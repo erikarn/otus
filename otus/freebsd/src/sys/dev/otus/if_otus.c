@@ -590,11 +590,27 @@ otus_bulk_tx_callback(struct usb_xfer *xfer, usb_error_t error)
 }
 
 static void
+otus_dump_usb_rx_page(struct otus_softc *sc, struct usb_page_cache *pc,
+    int actlen)
+{
+	char buf[128];
+	int i;
+
+	usbd_copy_out(pc, 0, buf, MIN(actlen, 128));
+	device_printf(sc->sc_dev, "USBRX:");
+	for (i = 0; i < MIN(actlen, 128); i++) {
+		printf(" %02x", buf[i] & 0xff);
+	}
+	printf("\n");
+}
+
+static void
 otus_bulk_rx_callback(struct usb_xfer *xfer, usb_error_t error)
 {
 	struct otus_softc *sc = usbd_xfer_softc(xfer);
 	int actlen;
 	int sumlen;
+	struct usb_page_cache *pc;
 
 	usbd_xfer_status(xfer, &actlen, &sumlen, NULL, NULL);
 	DPRINTF(sc, OTUS_DEBUG_USB_XFER,
@@ -624,6 +640,8 @@ otus_bulk_rx_callback(struct usb_xfer *xfer, usb_error_t error)
 		    "%s: comp; %d bytes\n",
 		    __func__,
 		    actlen);
+		pc = usbd_xfer_get_frame(xfer, 0);
+		otus_dump_usb_rx_page(sc, pc, actlen);
 		break;
 	default: /* Error */
 		/*
@@ -696,12 +714,14 @@ otus_bulk_cmd_callback(struct usb_xfer *xfer, usb_error_t error)
 	}
 }
 
+
 static void
 otus_bulk_irq_callback(struct usb_xfer *xfer, usb_error_t error)
 {
 	struct otus_softc *sc = usbd_xfer_softc(xfer);
 	int actlen;
 	int sumlen;
+	struct usb_page_cache *pc;
 
 	usbd_xfer_status(xfer, &actlen, &sumlen, NULL, NULL);
 	device_printf(sc->sc_dev,
@@ -728,6 +748,8 @@ otus_bulk_irq_callback(struct usb_xfer *xfer, usb_error_t error)
 		device_printf(sc->sc_dev, "%s: comp; %d bytes\n",
 		    __func__,
 		    actlen);
+		pc = usbd_xfer_get_frame(xfer, 0);
+		otus_dump_usb_rx_page(sc, pc, actlen);
 		break;
 	default: /* Error */
 		/*
