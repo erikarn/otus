@@ -7,6 +7,7 @@ SRCS    = if_otus.c if_otus_firmware.c	\
 	  if_otus_firmware.h		\
 	  if_otusvar.h if_otusreg.h	\
 	  if_otus_cmd.c if_otus_cmd.h	\
+	  if_otus_sysctl.c if_otus_sysctl.h	\
 	  if_otus_debug.h		\
 	  fwdesc.h			\
 	  version.h			\

@@ -88,6 +88,8 @@ __FBSDID("$FreeBSD$");
 #include "if_otus_cmd.h"
 #include "if_otusvar.h"
 
+#include "if_otus_sysctl.h"
+
 #include "fwcmd.h"
 
 /* unaligned little endian access */
@@ -481,6 +483,11 @@ otus_attach(device_t dev)
 		    "err=%s\n", usbd_errstr(error));
 		goto detach;
 	}
+
+	/*
+	 * Attach sysctl nodes.
+	 */
+	if_otus_sysctl_attach(sc);
 
 	/*
 	 * XXX Can we do a detach at any point? Ie, can we defer the

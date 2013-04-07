@@ -44,7 +44,7 @@ struct otus_softc {
 	struct mtx		sc_mtx;
 	struct usb_xfer		*sc_xfer[OTUS_N_XFER];
 	struct carl9170_firmware_info	fwinfo;
-	uint32_t		sc_debug;
+	uint64_t		sc_debug;
 
 	/* Command queue handling */
 	struct otus_cmd		sc_cmd[OTUS_CMD_LIST_COUNT];
