@@ -25,13 +25,17 @@ enum {
 
 #define	OTUS_LOCK(sc)		mtx_lock(&(sc)->sc_mtx)
 #define	OTUS_UNLOCK(sc)		mtx_unlock(&(sc)->sc_mtx)
-#define	OTUS_LOCK_ASSERT(sc, t)	mtx_assert(&(sc)->sc_mtx, t)
+#define	OTUS_LOCK_ASSERT(sc)	mtx_assert(&(sc)->sc_mtx, MA_OWNED)
+#define	OTUS_UNLOCK_ASSERT(sc)	mtx_assert(&(sc)->sc_mtx, MA_NOTOWNED)
 
 /* XXX the TX/RX endpoint dump says it's 0x200, (512)? */
-#define OTUS_MAX_TXSZ           512
-#define OTUS_MAX_RXSZ           512
+#define	OTUS_MAX_TXSZ		512
+#define	OTUS_MAX_RXSZ		512
 /* intr/cmd endpoint dump says 0x40 */
-#define OTUS_MAX_CTRLSZ         64
+#define OTUS_MAX_CTRLSZ		64
+
+#define	OTUS_STAT_INC(sc, s)	/* */
+#define	OTUS_STAT_DEC(sc, s)	/* */
 
 struct otus_softc {
 	device_t		sc_dev;
@@ -40,6 +44,14 @@ struct otus_softc {
 	struct mtx		sc_mtx;
 	struct usb_xfer		*sc_xfer[OTUS_N_XFER];
 	struct carl9170_firmware_info	fwinfo;
+	uint32_t		sc_debug;
+
+	/* Command queue handling */
+	struct otus_cmd		sc_cmd[OTUS_CMD_LIST_COUNT];
+	otus_cmdhead		sc_cmd_active;
+	otus_cmdhead		sc_cmd_inactive;
+	otus_cmdhead		sc_cmd_pending;
+	otus_cmdhead		sc_cmd_waiting;
 };
 
 #endif	/* __IF_OTUSVAR__ */

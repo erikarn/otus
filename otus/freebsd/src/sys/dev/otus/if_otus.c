@@ -85,6 +85,7 @@ __FBSDID("$FreeBSD$");
 
 #include "if_otusreg.h"
 #include "if_otus_firmware.h"
+#include "if_otus_cmd.h"
 #include "if_otusvar.h"
 
 #include "fwcmd.h"
@@ -271,8 +272,21 @@ otus_attach(device_t dev)
 	mtx_init(&sc->sc_mtx, device_get_nameunit(sc->sc_dev),
 	    MTX_NETWORK_LOCK, MTX_DEF);
 
-	iface_index = OTUS_IFACE_INDEX;
+	/*
+	 * Allocate xfers for firmware commands.
+	 */
+	error = otus_alloc_cmd_list(sc, sc->sc_cmd, OTUS_CMD_LIST_COUNT,
+	    OTUS_MAX_CMDSZ);
+	if (error != 0) {
+		device_printf(sc->sc_dev,
+		    "could not allocate Tx command list\n");
+		goto detach;
+	}
 
+	/*
+	 * Setup USB transfer pipes.
+	 */
+	iface_index = OTUS_IFACE_INDEX;
 	error = usbd_transfer_setup(uaa->device, &iface_index,
 		sc->sc_xfer, otus_config, OTUS_N_XFER, sc, &sc->sc_mtx);
 	if (error) {
@@ -282,12 +296,16 @@ otus_attach(device_t dev)
 	}
 
 	/*
-	 * Squeeze on firmware at attach phase, not ifup phase.
+	 * Load in the firmware, so we know the firmware config and
+	 * capabilities.
 	 */
 	error = otus_firmware_load(&sc->fwinfo);
 	if (error != 0)
 		goto detach;
 
+	/*
+	 * Squeeze in firmware at attach phase for now.
+	 */
 	error = otus_load_microcode(sc);
 	if (error != 0)
 		goto detach;
@@ -297,7 +315,6 @@ otus_attach(device_t dev)
 	/* XXX setup ifp */
 
 	/* XXX setup net80211 */
-
 
 	return (0);
 
@@ -310,6 +327,13 @@ static int
 otus_detach(device_t dev)
 {
 	struct otus_softc *sc = device_get_softc(dev);
+
+	OTUS_LOCK(sc);
+	/*
+	 * Free command list.
+	 */
+	otus_free_cmd_list(sc, sc->sc_cmd, OTUS_CMD_LIST_COUNT);
+	OTUS_UNLOCK(sc);
 
 	otus_firmware_cleanup(&sc->fwinfo);
 
