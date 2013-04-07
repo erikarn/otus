@@ -95,26 +95,265 @@ __FBSDID("$FreeBSD$");
 	 ((((u_int8_t *)(p))[0]      ) | (((u_int8_t *)(p))[1] <<  8) |	\
 	  (((u_int8_t *)(p))[2] << 16) | (((u_int8_t *)(p))[3] << 24)))
 
+/* recognized device vendors/products */
+static const STRUCT_USB_HOST_ID otus_devs[] = {
+	/* TP-Link TL-WN821N v2 - XXX has WPS button and one LED */
+	{ USB_VP(0x0cf3, 0x1002) },
+};
+
+static usb_callback_t	otus_bulk_tx_callback;
+static usb_callback_t	otus_bulk_rx_callback;
+static usb_callback_t	otus_bulk_irq_callback;
+static usb_callback_t	otus_bulk_cmd_callback;
+static int		otus_attach(device_t self);
+static int		otus_detach(device_t self);
+
+static const struct usb_config otus_config[OTUS_N_XFER] = {
+	[OTUS_BULK_TX] = {
+	.type = UE_BULK,
+	.endpoint = 1,
+	.direction = UE_DIR_OUT,
+	.bufsize = OTUS_MAX_TXSZ,
+	.flags = {.pipe_bof = 1,.force_short_xfer = 1,},
+	.callback = otus_bulk_tx_callback,
+	.timeout = 5000,        /* ms */
+	},
+	[OTUS_BULK_RX] = {
+	.type = UE_BULK,
+	.endpoint = 2,
+	.direction = UE_DIR_IN,
+	.bufsize = OTUS_MAX_RXSZ,
+	.flags = {.pipe_bof = 1,.short_xfer_ok = 1,},
+	.callback = otus_bulk_rx_callback,
+	},
+	[OTUS_BULK_IRQ] = {
+	.type = UE_INTERRUPT,
+	.endpoint = 3,
+	.direction = UE_DIR_IN,
+	.bufsize = OTUS_MAX_CTRLSZ,
+	.flags = {.pipe_bof = 1,.short_xfer_ok = 1,},
+	.callback = otus_bulk_irq_callback,
+	},
+	[OTUS_BULK_CMD] = {
+	.type = UE_INTERRUPT,
+	.endpoint = 4,
+	.direction = UE_DIR_OUT,
+	.bufsize = OTUS_MAX_CTRLSZ,
+	.flags = {.pipe_bof = 1,.force_short_xfer = 1,},
+	.callback = otus_bulk_cmd_callback,
+	.timeout = 5000,        /* ms */
+	},
+};
 
 static int
-otus_match(device_t self)
+otus_match(device_t dev)
 {
+	struct usb_attach_arg *uaa = device_get_ivars(dev);
 
-	return (EINVAL);
+	if (uaa->usb_mode != USB_MODE_HOST)
+		return (ENXIO);
+
+	if (uaa->info.bConfigIndex != OTUS_CONFIG_INDEX)
+		return (ENXIO);
+	if (uaa->info.bIfaceIndex != OTUS_IFACE_INDEX)
+		return (ENXIO);
+
+	return (usbd_lookup_id_by_uaa(otus_devs, sizeof(otus_devs), uaa));
 }
 
 static int
-otus_attach(device_t self)
+otus_attach(device_t dev)
 {
+	struct otus_softc *sc = device_get_softc(dev);
+	struct usb_attach_arg *uaa = device_get_ivars(dev);
+	uint8_t iface_index;
+	int error;
 
+	device_printf(dev, "%s: called\n", __func__);
+
+	device_set_usb_desc(dev);
+	sc->sc_udev = uaa->device;
+	sc->sc_dev = dev;
+
+	mtx_init(&sc->sc_mtx, device_get_nameunit(sc->sc_dev),
+	    MTX_NETWORK_LOCK, MTX_DEF);
+
+	iface_index = OTUS_IFACE_INDEX;
+
+	error = usbd_transfer_setup(uaa->device, &iface_index,
+		sc->sc_xfer, otus_config, OTUS_N_XFER, sc, &sc->sc_mtx);
+	if (error) {
+		device_printf(dev, "could not allocate USB transfers, "
+		    "err=%s\n", usbd_errstr(error));
+		goto detach;
+	}
+
+	return (0);
+
+detach:
+	otus_detach(dev);
 	return (ENXIO);
 }
 
 static int
-otus_detach(device_t self)
+otus_detach(device_t dev)
 {
+	struct otus_softc *sc = device_get_softc(dev);
 
+	if (sc->sc_xfer != NULL)
+		usbd_transfer_unsetup(sc->sc_xfer, OTUS_N_XFER);
+
+	device_printf(dev, "%s: called\n", __func__);
+	mtx_destroy(&sc->sc_mtx);
 	return (0);
+}
+
+static void
+otus_bulk_tx_callback(struct usb_xfer *xfer, usb_error_t error)
+{
+	struct otus_softc *sc = usbd_xfer_softc(xfer);
+	int actlen;
+	int sumlen;
+
+	usbd_xfer_status(xfer, &actlen, &sumlen, NULL, NULL);
+	device_printf(sc->sc_dev,
+	    "%s: called; state=%d\n",
+	    __func__,
+	    USB_GET_STATE(xfer));
+
+	switch (USB_GET_STATE(xfer)) {
+	case USB_ST_SETUP:
+		/*
+		 * Setup xfer frame lengths/count and data
+		 */
+		usbd_transfer_submit(xfer);
+	break;
+
+	case USB_ST_TRANSFERRED:
+		/*
+		 * Read usb frame data, if any.
+		 * "actlen" has the total length for all frames
+		 * transferred.
+		 */
+		break;
+	default: /* Error */
+		/*
+		 * Print error message and clear stall
+		 * for example.
+		 */
+		break;
+	}
+}
+
+static void
+otus_bulk_rx_callback(struct usb_xfer *xfer, usb_error_t error)
+{
+	struct otus_softc *sc = usbd_xfer_softc(xfer);
+	int actlen;
+	int sumlen;
+
+	usbd_xfer_status(xfer, &actlen, &sumlen, NULL, NULL);
+	device_printf(sc->sc_dev,
+	    "%s: called; state=%d\n",
+	    __func__,
+	    USB_GET_STATE(xfer));
+
+	switch (USB_GET_STATE(xfer)) {
+	case USB_ST_SETUP:
+		/*
+		 * Setup xfer frame lengths/count and data
+		 */
+		usbd_transfer_submit(xfer);
+	break;
+
+	case USB_ST_TRANSFERRED:
+		/*
+		 * Read usb frame data, if any.
+		 * "actlen" has the total length for all frames
+		 * transferred.
+		 */
+		break;
+	default: /* Error */
+		/*
+		 * Print error message and clear stall
+		 * for example.
+		 */
+		break;
+	}
+}
+
+static void
+otus_bulk_cmd_callback(struct usb_xfer *xfer, usb_error_t error)
+{
+	struct otus_softc *sc = usbd_xfer_softc(xfer);
+	int actlen;
+	int sumlen;
+
+	usbd_xfer_status(xfer, &actlen, &sumlen, NULL, NULL);
+	device_printf(sc->sc_dev,
+	    "%s: called; state=%d\n",
+	    __func__,
+	    USB_GET_STATE(xfer));
+
+	switch (USB_GET_STATE(xfer)) {
+	case USB_ST_SETUP:
+		/*
+		 * Setup xfer frame lengths/count and data
+		 */
+		usbd_transfer_submit(xfer);
+	break;
+
+	case USB_ST_TRANSFERRED:
+		/*
+		 * Read usb frame data, if any.
+		 * "actlen" has the total length for all frames
+		 * transferred.
+		 */
+		break;
+	default: /* Error */
+		/*
+		 * Print error message and clear stall
+		 * for example.
+		 */
+		break;
+	}
+}
+
+static void
+otus_bulk_irq_callback(struct usb_xfer *xfer, usb_error_t error)
+{
+	struct otus_softc *sc = usbd_xfer_softc(xfer);
+	int actlen;
+	int sumlen;
+
+	usbd_xfer_status(xfer, &actlen, &sumlen, NULL, NULL);
+	device_printf(sc->sc_dev,
+	    "%s: called; state=%d\n",
+	    __func__,
+	    USB_GET_STATE(xfer));
+
+	switch (USB_GET_STATE(xfer)) {
+	case USB_ST_SETUP:
+		/*
+		 * Setup xfer frame lengths/count and data
+		 */
+		usbd_transfer_submit(xfer);
+	break;
+
+	case USB_ST_TRANSFERRED:
+		/*
+		 * Read usb frame data, if any.
+		 * "actlen" has the total length for all frames
+		 * transferred.
+		 */
+		break;
+	default: /* Error */
+		/*
+		 * Print error message and clear stall
+		 * for example.
+		 */
+		break;
+	}
 }
 
 static device_method_t otus_methods[] = {
