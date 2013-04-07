@@ -87,6 +87,8 @@ __FBSDID("$FreeBSD$");
 #include "if_otus_firmware.h"
 #include "if_otusvar.h"
 
+#include "fwcmd.h"
+
 /* unaligned little endian access */
 #define LE_READ_2(p)							\
 	((u_int16_t)							\
@@ -162,6 +164,96 @@ otus_match(device_t dev)
 	return (usbd_lookup_id_by_uaa(otus_devs, sizeof(otus_devs), uaa));
 }
 
+#define	AR_FW_DOWNLOAD		0x30
+#define	AR_FW_DOWNLOAD_COMPLETE	0x31
+
+static int
+otus_load_microcode(struct otus_softc *sc)
+{
+	usb_device_request_t req;
+//	int error;
+	const uint8_t *ptr;
+	int addr;
+	int size, mlen;
+	char *buf;
+
+	ptr = sc->fwinfo.fw->data;
+	addr = sc->fwinfo.address;
+	size = sc->fwinfo.fw->datasize;
+
+	/*
+	 * Skip the offset
+	 */
+	ptr += sc->fwinfo.offset;
+	size -= sc->fwinfo.offset;
+
+	buf = malloc(4096, M_TEMP, M_NOWAIT | M_ZERO);
+	if (buf == NULL) {
+		device_printf(sc->sc_dev, "%s: malloc failed\n",
+		    __func__);
+		return (ENOMEM);
+	}
+
+	OTUS_LOCK(sc);
+
+	/*
+	 * Initial firmware load.
+	 */
+	bzero(&req, sizeof(req));
+	req.bmRequestType = UT_WRITE_VENDOR_DEVICE;
+	req.bRequest = AR_FW_DOWNLOAD;
+	USETW(req.wIndex, 0);
+
+	addr >>= 8;
+	while (size > 0) {
+		mlen = MIN(size, 4096);
+		memcpy(buf, ptr, mlen);
+
+		USETW(req.wValue, addr);
+		USETW(req.wLength, mlen);
+		device_printf(sc->sc_dev, "%s: loading %d bytes at 0x%08x\n",
+		    __func__,
+		    mlen,
+		    addr);
+		if (usbd_do_request(sc->sc_udev, &sc->sc_mtx, &req, buf)) {
+			device_printf(sc->sc_dev,
+			    "%s: failed to write firmware\n", __func__);
+			OTUS_UNLOCK(sc);
+			free(buf, M_TEMP);
+			return (EIO);
+		}
+		addr += mlen >> 8;
+		ptr  += mlen;
+		size -= mlen;
+	}
+
+	/*
+	 * Firmware complete.
+	 */
+	bzero(&req, sizeof(req));
+	req.bmRequestType = UT_WRITE_VENDOR_DEVICE;
+	req.bRequest = AR_FW_DOWNLOAD_COMPLETE;
+	USETW(req.wValue, 0);
+	USETW(req.wIndex, 0);
+	USETW(req.wLength, 0);
+	if (usbd_do_request(sc->sc_udev, &sc->sc_mtx, &req, NULL)) {
+		device_printf(sc->sc_dev,
+		    "%s: firmware initialization failed\n",
+		    __func__);
+		OTUS_UNLOCK(sc);
+		free(buf, M_TEMP);
+		return (EIO);
+	}
+
+	OTUS_UNLOCK(sc);
+	free(buf, M_TEMP);
+
+	/*
+	 * It's up to the caller to check whether we were successful.
+	 */
+	return (0);
+}
+
 static int
 otus_attach(device_t dev)
 {
@@ -193,6 +285,10 @@ otus_attach(device_t dev)
 	 * Squeeze on firmware at attach phase, not ifup phase.
 	 */
 	error = otus_firmware_load(&sc->fwinfo);
+	if (error != 0)
+		goto detach;
+
+	error = otus_load_microcode(sc);
 	if (error != 0)
 		goto detach;
 

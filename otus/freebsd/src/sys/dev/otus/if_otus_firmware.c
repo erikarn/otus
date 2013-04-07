@@ -193,12 +193,21 @@ carl9170_fw(struct carl9170_firmware_info *fwinfo, const uint8_t *data,
 
         fwinfo->api_version = otus_desc->api_ver;
 
+	fwinfo->vif_num = otus_desc->vif_num;
+	fwinfo->cmd_bufs = otus_desc->cmd_bufs;
+	fwinfo->address = le32_to_cpu(otus_desc->fw_address);
+	fwinfo->rx_size = le16_to_cpu(otus_desc->rx_max_frame_len);
+	fwinfo->mem_blocks = MIN(otus_desc->tx_descs, 0xfe);
+//	atomic_set(&ar->mem_free_blocks, ar->fw.mem_blocks);
+	fwinfo->mem_block_size = le16_to_cpu(otus_desc->tx_frag_len);
+
         if (SUPP(CARL9170FW_MINIBOOT))
                 fwinfo->offset = le16_to_cpu(otus_desc->miniboot_size);
         else
                 fwinfo->offset = 0;
 
 	return (0);
+#undef SUPP
 }
 
 int
@@ -247,10 +256,11 @@ otus_firmware_load(struct carl9170_firmware_info *fwinfo)
 		return (EINVAL);
 	}
 
-	printf("%s: firmware api=%d, offset=%d bytes\n",
+	printf("%s: firmware api=%d, offset=%d bytes, address=0x%08x\n",
 	    __func__,
 	    fwinfo->api_version,
-	    fwinfo->offset);
+	    fwinfo->offset,
+	    fwinfo->address);
 
 	/*
 	 * Completed!
