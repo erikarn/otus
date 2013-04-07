@@ -84,6 +84,7 @@ __FBSDID("$FreeBSD$");
 #include "usbdevs.h"
 
 #include "if_otusreg.h"
+#include "if_otus_firmware.h"
 #include "if_otusvar.h"
 
 /* unaligned little endian access */
@@ -188,6 +189,20 @@ otus_attach(device_t dev)
 		goto detach;
 	}
 
+	/*
+	 * Squeeze on firmware at attach phase, not ifup phase.
+	 */
+	error = otus_firmware_load(&sc->fwinfo);
+	if (error != 0)
+		goto detach;
+
+	/* XXX read eeprom, device setup, etc */
+
+	/* XXX setup ifp */
+
+	/* XXX setup net80211 */
+
+
 	return (0);
 
 detach:
@@ -199,6 +214,8 @@ static int
 otus_detach(device_t dev)
 {
 	struct otus_softc *sc = device_get_softc(dev);
+
+	otus_firmware_cleanup(&sc->fwinfo);
 
 	if (sc->sc_xfer != NULL)
 		usbd_transfer_unsetup(sc->sc_xfer, OTUS_N_XFER);

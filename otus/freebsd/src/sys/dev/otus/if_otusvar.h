@@ -23,6 +23,10 @@ enum {
 	OTUS_N_XFER
 };
 
+#define	OTUS_LOCK(sc)		mtx_lock(&(sc)->sc_mtx)
+#define	OTUS_UNLOCK(sc)		mtx_unlock(&(sc)->sc_mtx)
+#define	OTUS_LOCK_ASSERT(sc, t)	mtx_assert(&(sc)->sc_mtx, t)
+
 /* XXX the TX/RX endpoint dump says it's 0x200, (512)? */
 #define OTUS_MAX_TXSZ           512
 #define OTUS_MAX_RXSZ           512
@@ -35,6 +39,7 @@ struct otus_softc {
 	struct ifnet		*sc_ifp;
 	struct mtx		sc_mtx;
 	struct usb_xfer		*sc_xfer[OTUS_N_XFER];
+	struct carl9170_firmware_info	fwinfo;
 };
 
 #endif	/* __IF_OTUSVAR__ */
