@@ -87,6 +87,7 @@ __FBSDID("$FreeBSD$");
 #include "if_otus_firmware.h"
 #include "if_otus_cmd.h"
 #include "if_otusvar.h"
+#include "if_otus_debug.h"
 
 #include "if_otus_sysctl.h"
 
@@ -189,7 +190,8 @@ otus_cmdsend(struct otus_softc *sc, uint32_t code, const void *idata,
 	/* grab a xfer */
 	cmd = otus_get_cmdbuf(sc);
 	if (cmd == NULL) {
-		device_printf(sc->sc_dev, "%s: empty inactive queue\n",
+		DPRINTF(sc, OTUS_DEBUG_CMDS,
+		    "%s: empty inactive queue\n",
 		    __func__);
 		return (ENOBUFS);
 	}
@@ -558,7 +560,7 @@ otus_bulk_tx_callback(struct usb_xfer *xfer, usb_error_t error)
 	int sumlen;
 
 	usbd_xfer_status(xfer, &actlen, &sumlen, NULL, NULL);
-	device_printf(sc->sc_dev,
+	DPRINTF(sc, OTUS_DEBUG_USB_XFER,
 	    "%s: called; state=%d\n",
 	    __func__,
 	    USB_GET_STATE(xfer));
@@ -595,7 +597,7 @@ otus_bulk_rx_callback(struct usb_xfer *xfer, usb_error_t error)
 	int sumlen;
 
 	usbd_xfer_status(xfer, &actlen, &sumlen, NULL, NULL);
-	device_printf(sc->sc_dev,
+	DPRINTF(sc, OTUS_DEBUG_USB_XFER,
 	    "%s: called; state=%d\n",
 	    __func__,
 	    USB_GET_STATE(xfer));
@@ -605,7 +607,9 @@ otus_bulk_rx_callback(struct usb_xfer *xfer, usb_error_t error)
 		/*
 		 * Setup xfer frame lengths/count and data
 		 */
-		device_printf(sc->sc_dev, "%s: setup\n", __func__);
+		DPRINTF(sc, OTUS_DEBUG_USB_XFER,
+		    "%s: setup\n",
+		    __func__);
 		usbd_xfer_set_frame_len(xfer, 0, usbd_xfer_max_len(xfer));
 		usbd_transfer_submit(xfer);
 	break;
@@ -616,7 +620,8 @@ otus_bulk_rx_callback(struct usb_xfer *xfer, usb_error_t error)
 		 * "actlen" has the total length for all frames
 		 * transferred.
 		 */
-		device_printf(sc->sc_dev, "%s: comp; %d bytes\n",
+		DPRINTF(sc, OTUS_DEBUG_USB_XFER,
+		    "%s: comp; %d bytes\n",
 		    __func__,
 		    actlen);
 		break;
@@ -638,7 +643,7 @@ otus_bulk_cmd_callback(struct usb_xfer *xfer, usb_error_t error)
 	int sumlen;
 
 	usbd_xfer_status(xfer, &actlen, &sumlen, NULL, NULL);
-	device_printf(sc->sc_dev,
+	DPRINTF(sc, OTUS_DEBUG_USB_XFER,
 	    "%s: called; state=%d\n",
 	    __func__,
 	    USB_GET_STATE(xfer));
@@ -655,7 +660,7 @@ otus_bulk_cmd_callback(struct usb_xfer *xfer, usb_error_t error)
 		/*
 		 * Complete a frame.
 		 */
-		device_printf(sc->sc_dev, "%s: comp\n", __func__);
+		DPRINTF(sc, OTUS_DEBUG_USB_XFER, "%s: comp\n", __func__);
 		(void) otus_comp_cmdbuf(sc);
 
 		/* XXX FALLTHROUGH */
@@ -670,10 +675,12 @@ otus_bulk_cmd_callback(struct usb_xfer *xfer, usb_error_t error)
 		 */
 		cmd = otus_get_next_cmdbuf(sc);
 		if (cmd != NULL) {
-			device_printf(sc->sc_dev, "%s: setup - %d bytes\n",
+			DPRINTF(sc, OTUS_DEBUG_USB_XFER,
+			    "%s: setup - %d bytes\n",
 			    __func__,
 			    cmd->buflen);
-			otus_cmd_dump(sc, cmd);
+			if (DODEBUG(sc, OTUS_DEBUG_CMDS_DUMP))
+				otus_cmd_dump(sc, cmd);
 			usbd_xfer_set_frame_data(xfer, 0, cmd->buf,
 			    cmd->buflen);
 			usbd_transfer_submit(xfer);

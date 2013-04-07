@@ -28,4 +28,6 @@ enum {
 		printf(fmt, __VA_ARGS__);		\
 } while (0)
 
+#define	DODEBUG(sc, m)		((sc)->sc_debug & m)
+
 #endif	/* __IF_OTUS_DEBUG__ */

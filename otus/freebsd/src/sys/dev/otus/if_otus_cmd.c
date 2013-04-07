@@ -143,7 +143,7 @@ otus_get_cmdbuf(struct otus_softc *sc)
 	} else
 		uc = NULL;
 	if (uc == NULL)
-		DPRINTF(sc, OTUS_DEBUG_XMIT, "%s: %s\n", __func__,
+		DPRINTF(sc, OTUS_DEBUG_CMDS, "%s: %s\n", __func__,
 		    "out of command xmit buffers");
 	return (uc);
 }
@@ -190,7 +190,7 @@ otus_get_next_cmdbuf(struct otus_softc *sc)
 
 	cmd = STAILQ_FIRST(&sc->sc_cmd_pending);
 	if (cmd == NULL) {
-		DPRINTF(sc, OTUS_DEBUG_XMIT, "%s: empty pending queue\n",
+		DPRINTF(sc, OTUS_DEBUG_CMDS, "%s: empty pending queue\n",
 		    __func__);
 		return (NULL);
 	}
