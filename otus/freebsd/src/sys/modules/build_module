@@ -1,0 +1,20 @@
+#!/bin/sh
+
+X_SRCDIR=${X_SRCDIR:="/home/adrian/work/freebsd/stable/9/src/"}
+X_KERNDIR=${X_KERNDIR:="${X_SRCDIR}/i386/compile/MARILYN-9-STABLE"}
+X_KMODOWN=${X_KMODOWN:="adrian"}
+X_KMODGRP=${X_KMODGRP:="adrian"}
+
+# This allows for -HEAD includes for net80211 ..
+env CFLAGS="-I../../../sys/" \
+make \
+	MODULES_OVERRIDE="" \
+	DEBUG_FLAGS="-g" \
+	DEBUG_FLAGS="-g" \
+	KMODDIR="../../../../modules/" \
+	KMODOWN="${X_KMODOWN}" \
+	KMODGRP="${X_KMODGRP}" \
+	MAKESYSPATH="${X_SRCDIR}/share/mk" \
+	SYSDIR="${X_SRCDIR}/sys/" \
+	KERNBUILDDIR="${X_KERNDIR}" \
+	$@
