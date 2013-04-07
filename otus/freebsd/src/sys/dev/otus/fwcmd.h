@@ -216,7 +216,6 @@ struct carl9170_cmd_head {
 			u8	seq;
 			u8	ext;
 		} __packed c;
-
 		u32 hdr_data;
 	} __packed h;
 } __packed;

@@ -148,6 +148,67 @@ otus_get_cmdbuf(struct otus_softc *sc)
 	return (uc);
 }
 
+/*
+ * Prepare the next command buffer on the top of the
+ * active stack for transmission to the target.
+ *
+ * Return 0 if no buffer was found, 1 if a buffer was
+ * found and prepared, and < 0 on error.
+ */
+int
+otus_comp_cmdbuf(struct otus_softc *sc)
+{
+	struct otus_cmd *cmd;
+
+	OTUS_LOCK_ASSERT(sc);
+	cmd = STAILQ_FIRST(&sc->sc_cmd_active);
+	/* Nothing there? Fall through */
+	if (cmd == NULL)
+		return (0);
+	STAILQ_REMOVE_HEAD(&sc->sc_cmd_active, next);
+	OTUS_STAT_DEC(sc, st_cmd_active);
+	STAILQ_INSERT_TAIL((cmd->flags & OTUS_CMD_FLAG_READ) ?
+	    &sc->sc_cmd_waiting : &sc->sc_cmd_inactive, cmd, next);
+	if (cmd->flags & OTUS_CMD_FLAG_READ)
+		OTUS_STAT_INC(sc, st_cmd_waiting);
+	else
+		OTUS_STAT_INC(sc, st_cmd_inactive);
+	return (1);
+}
+
+/*
+ * Prepare the next command buffer to be pushed to the
+ * USB driver.
+ *
+ * Returns the command in question to push to the hardware,
+ * or NULL if nothing was found.
+ */
+struct otus_cmd *
+otus_get_next_cmdbuf(struct otus_softc *sc)
+{
+	struct otus_cmd *cmd;
+
+	cmd = STAILQ_FIRST(&sc->sc_cmd_pending);
+	if (cmd == NULL) {
+		DPRINTF(sc, OTUS_DEBUG_XMIT, "%s: empty pending queue\n",
+		    __func__);
+		return (NULL);
+	}
+	STAILQ_REMOVE_HEAD(&sc->sc_cmd_pending, next);
+	OTUS_STAT_DEC(sc, st_cmd_pending);
+	STAILQ_INSERT_TAIL((cmd->flags & OTUS_CMD_FLAG_ASYNC) ?
+	    &sc->sc_cmd_inactive : &sc->sc_cmd_active, cmd, next);
+	if (cmd->flags & OTUS_CMD_FLAG_ASYNC)
+		OTUS_STAT_INC(sc, st_cmd_inactive);
+	else
+		OTUS_STAT_INC(sc, st_cmd_active);
+
+	return (cmd);
+}
+#if 0
+                usbd_xfer_set_frame_data(xfer, 0, cmd->buf, cmd->buflen);
+                usbd_transfer_submit(xfer);
+#endif
 
 #if 0
 /*

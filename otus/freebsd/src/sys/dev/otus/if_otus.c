@@ -165,6 +165,193 @@ otus_match(device_t dev)
 	return (usbd_lookup_id_by_uaa(otus_devs, sizeof(otus_devs), uaa));
 }
 
+/*
+ * Command send/receive/queue functions.
+ *
+ * These (partially) belong in if_otus_cmd.[ch], however until the
+ * "right" abstraction is written up, this'll have to do.
+ */
+/*
+ * Low-level function to send read or write commands to the firmware.
+ */
+static int
+otus_cmdsend(struct otus_softc *sc, uint32_t code, const void *idata,
+    int ilen, void *odata, int olen, int flags)
+{
+	struct carl9170_cmd_head *hdr;
+	struct otus_cmd *cmd;
+//	int error;
+
+	OTUS_LOCK_ASSERT(sc);
+
+	/* grab a xfer */
+	cmd = otus_get_cmdbuf(sc);
+	if (cmd == NULL) {
+		device_printf(sc->sc_dev, "%s: empty inactive queue\n",
+		    __func__);
+		return (ENOBUFS);
+	}
+
+	/*
+	 * carl9170 header fields:
+	 * + len
+	 * + cmd
+	 * + seq
+	 * + ext
+	 *
+	 * XXX the Linux headers use u8 fields which the compiler may decide
+	 * to align.  We need to ensure this doesn't occur!
+	 */
+	hdr = (struct carl9170_cmd_head *)cmd->buf;
+	bzero(hdr, sizeof (struct carl9170_cmd_head));	/* XXX not needed */
+	hdr->h.c.cmd = code;
+	hdr->h.c.len = ilen;
+	hdr->h.c.seq = 0; /* XXX */
+	hdr->h.c.ext = 0; /* XXX */
+
+	/* Copy the payload, if needed */
+	/* XXX TODO: check payload len? */
+	bcopy(idata, (uint8_t *)(hdr + 1), ilen);
+
+	/*
+	 * Finalise buffer configuration.
+	 */
+	cmd->flags = flags;
+
+	/* XXX should I ensure I always TX a multiple of 4 bytes? */
+	/* XXX 4 == (sizeof(struct carl9170_cmd_head)) */
+	cmd->buflen = ilen + 4;
+
+#ifdef OTUS_DEBUG
+	if (sc->sc_debug & OTUS_DEBUG_CMDS) {
+	printf("%s: send  %d [flags 0x%x] olen %d\n",
+	    __func__, code, cmd->flags, olen);
+#if 0
+	if (sc->sc_debug & OTUS_DEBUG_CMDS_DUMP)
+		otus_dump_cmd(cmd->buf, cmd->buflen, '+');
+	}
+#endif
+#endif
+
+	cmd->odata = odata;
+	KASSERT(odata == NULL ||
+	    olen < OTUS_MAX_CMDSZ - sizeof(*hdr) + sizeof(uint32_t),
+	    ("odata %p olen %u", odata, olen));
+	 cmd->olen = olen;
+
+	STAILQ_INSERT_TAIL(&sc->sc_cmd_pending, cmd, next);
+	OTUS_STAT_INC(sc, st_cmd_pending);
+	
+	/* Kick off the actual USB command queue transaction */
+	usbd_transfer_start(sc->sc_xfer[OTUS_BULK_CMD]);
+
+	/*
+	 * XXX check to see whether command responses come in the
+	 * IRQ or RX queue.
+	 *
+	 * XXX TODO: It looks like it's actually pushing the command
+	 * response into the RX queue, not the IRQ queue.
+	 *
+	 * So I'm going to have to dig deeper into this and figure
+	 * out the best way to separate command responses and
+	 * receive frames.
+	 */
+	if (cmd->flags & OTUS_CMD_FLAG_READ) {
+		/* XXX enable both for now, just to see what happens */
+		usbd_transfer_start(sc->sc_xfer[OTUS_BULK_IRQ]);
+		usbd_transfer_start(sc->sc_xfer[OTUS_BULK_RX]);
+
+		/*
+		 * For now, let's not support synchronous command
+		 * sending.
+		 *
+		 * I'll look into supporting this in a more generic
+		 * fashion later.
+		 */
+#if 0
+                /* wait at most two seconds for command reply */
+                error = mtx_sleep(cmd, &sc->sc_mtx, 0, "otuscmd", 2 * hz);
+                cmd->odata = NULL;      /* in case reply comes too late */
+                if (error != 0) {
+                        device_printf(sc->sc_dev, "timeout waiting for reply "
+                            "to cmd 0x%x (%u)\n", code, code);
+                } else if (cmd->olen != olen) {
+                        device_printf(sc->sc_dev, "unexpected reply data count "
+                            "to cmd 0x%x (%u), got %u, expected %u\n",
+                            code, code, cmd->olen, olen);
+                        error = EINVAL;
+                }
+                return (error);
+#endif
+	}
+	return (0);
+}
+
+static int
+otus_cmd_read(struct otus_softc *sc, uint32_t code, const void *idata,
+    int ilen, void *odata, int olen, int flags)
+{
+
+	flags |= OTUS_CMD_FLAG_READ;
+	return otus_cmdsend(sc, code, idata, ilen, odata, olen, flags);
+}
+
+#if 0
+static int
+otus_cmd_write(struct otus_softc *sc, uint32_t code, const void *data,
+    int len, int flags)
+{
+
+	flags &= ~OTUS_CMD_FLAG_READ;
+	return otus_cmdsend(sc, code, data, len, NULL, 0, flags);
+}
+#endif
+
+static int
+otus_cmd_send_ping(struct otus_softc *sc, uint32_t value)
+{
+	uint32_t retval = 0xf0f0f0f0;
+	int r;
+
+	/*
+	 * ECHO request / response is a READ request with the response
+	 * coming back in the read response.  Nice and straightforward.
+	 */
+	r = otus_cmd_read(sc, CARL9170_CMD_ECHO, (void *) &value, 4,
+	    (void *) &retval, 4, 0);
+
+	if (r != 0) {
+		device_printf(sc->sc_dev, "%s: cmd_send failed\n", __func__);
+//		return (EIO);
+		return (0);
+	}
+
+	if (retval != value) {
+		device_printf(sc->sc_dev, "%s: PING: sent 0x%08x, got 0x%08x\n",
+		    __func__,
+		    value,
+		    retval);
+		
+//		return (EIO);
+		return (0);
+	}
+
+	return (0);
+}
+
+
+static void
+otus_cmd_dump(struct otus_softc *sc, struct otus_cmd *cmd)
+{
+	int i;
+
+	device_printf(sc->sc_dev, "CMD:");
+	for (i = 0; i < cmd->buflen; i++) {
+		printf(" %02x", cmd->buf[i] & 0xff);
+	}
+	printf("\n");
+}
+
 #define	AR_FW_DOWNLOAD		0x30
 #define	AR_FW_DOWNLOAD_COMPLETE	0x31
 
@@ -296,6 +483,12 @@ otus_attach(device_t dev)
 	}
 
 	/*
+	 * XXX Can we do a detach at any point? Ie, can we defer the
+	 * XXX rest of this setup path and if attach fails, just
+	 * XXX call detach from some taskqueue/callout?
+	 */
+
+	/*
 	 * Load in the firmware, so we know the firmware config and
 	 * capabilities.
 	 */
@@ -309,6 +502,11 @@ otus_attach(device_t dev)
 	error = otus_load_microcode(sc);
 	if (error != 0)
 		goto detach;
+
+	/* XXX doing a ping here is likely evil (we're in probe/attach!) .. */
+	OTUS_LOCK(sc);
+	(void) otus_cmd_send_ping(sc, 0x89abcdef);
+	OTUS_UNLOCK(sc);
 
 	/* XXX read eeprom, device setup, etc */
 
@@ -400,6 +598,8 @@ otus_bulk_rx_callback(struct usb_xfer *xfer, usb_error_t error)
 		/*
 		 * Setup xfer frame lengths/count and data
 		 */
+		device_printf(sc->sc_dev, "%s: setup\n", __func__);
+		usbd_xfer_set_frame_len(xfer, 0, usbd_xfer_max_len(xfer));
 		usbd_transfer_submit(xfer);
 	break;
 
@@ -409,6 +609,9 @@ otus_bulk_rx_callback(struct usb_xfer *xfer, usb_error_t error)
 		 * "actlen" has the total length for all frames
 		 * transferred.
 		 */
+		device_printf(sc->sc_dev, "%s: comp; %d bytes\n",
+		    __func__,
+		    actlen);
 		break;
 	default: /* Error */
 		/*
@@ -423,6 +626,7 @@ static void
 otus_bulk_cmd_callback(struct usb_xfer *xfer, usb_error_t error)
 {
 	struct otus_softc *sc = usbd_xfer_softc(xfer);
+	struct otus_cmd *cmd;
 	int actlen;
 	int sumlen;
 
@@ -433,12 +637,6 @@ otus_bulk_cmd_callback(struct usb_xfer *xfer, usb_error_t error)
 	    USB_GET_STATE(xfer));
 
 	switch (USB_GET_STATE(xfer)) {
-	case USB_ST_SETUP:
-		/*
-		 * Setup xfer frame lengths/count and data
-		 */
-		usbd_transfer_submit(xfer);
-	break;
 
 	case USB_ST_TRANSFERRED:
 		/*
@@ -446,7 +644,35 @@ otus_bulk_cmd_callback(struct usb_xfer *xfer, usb_error_t error)
 		 * "actlen" has the total length for all frames
 		 * transferred.
 		 */
+
+		/*
+		 * Complete a frame.
+		 */
+		device_printf(sc->sc_dev, "%s: comp\n", __func__);
+		(void) otus_comp_cmdbuf(sc);
+
+		/* XXX FALLTHROUGH */
+
+	case USB_ST_SETUP:
+		/*
+		 * Setup xfer frame lengths/count and data
+		 */
+
+		/*
+		 * If we have anything next to queue, do so.
+		 */
+		cmd = otus_get_next_cmdbuf(sc);
+		if (cmd != NULL) {
+			device_printf(sc->sc_dev, "%s: setup - %d bytes\n",
+			    __func__,
+			    cmd->buflen);
+			otus_cmd_dump(sc, cmd);
+			usbd_xfer_set_frame_data(xfer, 0, cmd->buf,
+			    cmd->buflen);
+			usbd_transfer_submit(xfer);
+		}
 		break;
+
 	default: /* Error */
 		/*
 		 * Print error message and clear stall
@@ -474,8 +700,10 @@ otus_bulk_irq_callback(struct usb_xfer *xfer, usb_error_t error)
 		/*
 		 * Setup xfer frame lengths/count and data
 		 */
+		device_printf(sc->sc_dev, "%s: setup\n", __func__);
+		usbd_xfer_set_frame_len(xfer, 0, usbd_xfer_max_len(xfer));
 		usbd_transfer_submit(xfer);
-	break;
+		break;
 
 	case USB_ST_TRANSFERRED:
 		/*
@@ -483,6 +711,9 @@ otus_bulk_irq_callback(struct usb_xfer *xfer, usb_error_t error)
 		 * "actlen" has the total length for all frames
 		 * transferred.
 		 */
+		device_printf(sc->sc_dev, "%s: comp; %d bytes\n",
+		    __func__,
+		    actlen);
 		break;
 	default: /* Error */
 		/*
