@@ -637,17 +637,6 @@ otus_bulk_rx_callback(struct usb_xfer *xfer, usb_error_t error)
 	    USB_GET_STATE(xfer));
 
 	switch (USB_GET_STATE(xfer)) {
-	case USB_ST_SETUP:
-		/*
-		 * Setup xfer frame lengths/count and data
-		 */
-		DPRINTF(sc, OTUS_DEBUG_USB_XFER,
-		    "%s: setup\n",
-		    __func__);
-		usbd_xfer_set_frame_len(xfer, 0, usbd_xfer_max_len(xfer));
-		usbd_transfer_submit(xfer);
-
-		/* XXX fallthrough */
 
 	case USB_ST_TRANSFERRED:
 		/*
@@ -661,7 +650,20 @@ otus_bulk_rx_callback(struct usb_xfer *xfer, usb_error_t error)
 		    actlen);
 		pc = usbd_xfer_get_frame(xfer, 0);
 		otus_dump_usb_rx_page(sc, pc, actlen);
+
+		/* XXX fallthrough */
+
+	case USB_ST_SETUP:
+		/*
+		 * Setup xfer frame lengths/count and data
+		 */
+		DPRINTF(sc, OTUS_DEBUG_USB_XFER,
+		    "%s: setup\n",
+		    __func__);
+		usbd_xfer_set_frame_len(xfer, 0, usbd_xfer_max_len(xfer));
+		usbd_transfer_submit(xfer);
 		break;
+
 	default: /* Error */
 		/*
 		 * Print error message and clear stall
@@ -754,17 +756,6 @@ otus_bulk_irq_callback(struct usb_xfer *xfer, usb_error_t error)
 	    USB_GET_STATE(xfer));
 
 	switch (USB_GET_STATE(xfer)) {
-	case USB_ST_SETUP:
-		/*
-		 * Setup xfer frame lengths/count and data
-		 */
-		DPRINTF(sc, OTUS_DEBUG_USB_XFER,
-		    "%s: setup\n", __func__);
-		usbd_xfer_set_frame_len(xfer, 0, usbd_xfer_max_len(xfer));
-		usbd_transfer_submit(xfer);
-
-		/* XXX fallthrough */
-
 	case USB_ST_TRANSFERRED:
 		/*
 		 * Read usb frame data, if any.
@@ -777,7 +768,17 @@ otus_bulk_irq_callback(struct usb_xfer *xfer, usb_error_t error)
 		    actlen);
 		pc = usbd_xfer_get_frame(xfer, 0);
 		otus_dump_usb_rx_page(sc, pc, actlen);
+		/* XXX fallthrough */
+	case USB_ST_SETUP:
+		/*
+		 * Setup xfer frame lengths/count and data
+		 */
+		DPRINTF(sc, OTUS_DEBUG_USB_XFER,
+		    "%s: setup\n", __func__);
+		usbd_xfer_set_frame_len(xfer, 0, usbd_xfer_max_len(xfer));
+		usbd_transfer_submit(xfer);
 		break;
+
 	default: /* Error */
 		/*
 		 * Print error message and clear stall
