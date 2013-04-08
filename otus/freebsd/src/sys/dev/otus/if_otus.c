@@ -92,6 +92,7 @@ __FBSDID("$FreeBSD$");
 #include "if_otus_sysctl.h"
 
 #include "fwcmd.h"
+#include "hw.h"
 
 /* unaligned little endian access */
 #define LE_READ_2(p)							\
@@ -129,8 +130,8 @@ static const struct usb_config otus_config[OTUS_N_XFER] = {
 	.type = UE_BULK,
 	.endpoint = UE_ADDR_ANY,
 	.direction = UE_DIR_IN,
-	.bufsize = 0x200,
-	.flags = {.pipe_bof = 1,.short_xfer_ok = 1,},
+	.bufsize = MCLBYTES,
+	.flags = { .ext_buffer = 1, .pipe_bof = 1,.short_xfer_ok = 1,},
 	.callback = otus_bulk_rx_callback,
 	},
 	[OTUS_BULK_IRQ] = {
@@ -558,6 +559,12 @@ otus_detach(device_t dev)
 	 * Free command list.
 	 */
 	otus_free_cmd_list(sc, sc->sc_cmd, OTUS_CMD_LIST_COUNT);
+
+	/*
+	 * Free mbuf
+	 */
+	if (sc->sc_rx_m != NULL)
+		m_freem(sc->sc_rx_m);
 	OTUS_UNLOCK(sc);
 
 	otus_firmware_cleanup(&sc->fwinfo);
@@ -569,6 +576,199 @@ otus_detach(device_t dev)
 	mtx_destroy(&sc->sc_mtx);
 	return (0);
 }
+
+/*
+ * Receive dispatch routines.
+ */
+
+static void
+otus_rx_data(struct otus_softc *sc, const uint8_t *buf, int len)
+{
+
+	/* XXX TODO */
+}
+
+/*
+ * Check whether the current sequence number is the expected;
+ * update local state.
+ */
+static int
+otus_check_sequence(struct otus_softc *sc, uint8_t seq)
+{
+	OTUS_LOCK_ASSERT(sc);
+
+	/* XXX for now, just return true */
+	return (0);
+}
+
+/*
+ * XXX from carl9170
+ */
+static void
+otus_rx_cmds(struct otus_softc *sc, const uint8_t *buf, uint8_t len)
+{
+	const struct carl9170_rsp *cmd;
+	int i = 0;
+
+	OTUS_LOCK_ASSERT(sc);
+
+
+	while (i < len) {
+		cmd = (const struct carl9170_rsp *) &buf[i];
+
+		i += cmd->hdr.h.c.len + 4;
+		if (i > len)
+			break;
+
+		if (otus_check_sequence(sc, cmd->hdr.h.c.seq))
+			break;
+
+		device_printf(sc->sc_dev,
+		    "%s: code=%d, len=%d\n",
+		    __func__,
+		    cmd->hdr.h.c.cmd,
+		    cmd->hdr.h.c.len);
+#if 0
+                carl9170_handle_command_response(ar, cmd, cmd->hdr.len + 4);
+#endif
+	}
+
+#if 0
+	if (i == len)
+		return;
+
+	/* XXX should log an error */
+#endif
+}
+
+/*
+ * XXX from carl9170, but explained!
+ */
+static void
+otus_rx_dispatch(struct otus_softc *sc, const uint8_t *buf, int len)
+{
+	int i = 0;
+
+	/*
+	 * Check if the PLCP header is all 0xff's - this says its
+	 * a command.
+	 */
+	while (len > 2 && i < 12 && buf[0] == 0xff && buf[1] == 0xff) {
+		i += 2;
+		len -= 2;
+		buf += 2;
+	}
+
+	/*
+	 * If the resulting payload isn't long enough for at least
+	 * one command response, don't continue.
+	 *
+	 * XXX should log / print something!
+	 */
+	if (len < 4)
+		return;
+
+	/*
+	 * PLCP?
+	 */
+	if (i == 12)
+		otus_rx_cmds(sc, buf, len);
+	else
+		otus_rx_data(sc, buf, len);
+}
+
+static void
+otus_dump_usb_rx_page(struct otus_softc *sc, const char *buf, int actlen)
+{
+	int i;
+
+	device_printf(sc->sc_dev, "USBRX:");
+	for (i = 0; i < actlen; i++) {
+		printf(" %02x", buf[i] & 0xff);
+	}
+	printf("\n");
+}
+
+/*
+ * The later AR9170 firmware releases support a "RX stream" mode, where
+ * multiple receive frames are pushed into the same USB transaction.
+ * So we need to (a) pull those apart, and (b) incomplete frames
+ * need to be joined to the next RX transaction.
+ */
+static void
+otus_rx_frame(struct otus_softc *sc, struct mbuf *m, int len)
+{
+	const char *buf;
+	const char *tbuf;
+	int tlen, wlen, clen;
+	const struct ar9170_stream *rx_stream;
+
+	buf = mtod(m, const char *);
+	otus_dump_usb_rx_page(sc, buf, len);
+
+	tbuf = buf;
+	tlen = len;
+
+	while (tlen >= 4) {
+		rx_stream = (const struct ar9170_stream *) tbuf;
+		/* Grab the frame length and pad it to a DWORD boundary */
+		clen = le16toh(rx_stream->length);
+		wlen = roundup2(clen, 4);
+
+		/*
+		 * Check whether there's a header - if it isn't a valid
+		 * header, we may need to stitch this together with the
+		 * next frame.
+		 */
+		if (le16toh(rx_stream->tag) != AR9170_RX_STREAM_TAG) {
+			device_printf(sc->sc_dev, "%s: tag=%d (not %d)\n",
+			    __func__,
+			    le16toh(rx_stream->tag),
+			    AR9170_RX_STREAM_TAG);
+			break;
+		}
+
+		/*
+		 * See what the length is.  If it's bigger than this buffer,
+		 * we may need to stitch this with a future frame.
+		 * But for now we'll just complain loudly whilst I debug this.
+		 */
+		if (wlen > tlen) {
+			device_printf(sc->sc_dev,
+			    "%s: payload too big (clen=%d, wlan=%d > tlen=%d)\n",
+			    __func__,
+			    clen,
+			    wlen,
+			    tlen);
+			break;
+		}
+
+		/*
+		 * Punt it up.
+		 */
+		device_printf(sc->sc_dev,
+		    "%s: valid tag! clen=%d, wlen=%d\n",
+		    __func__,
+		    clen,
+		    wlen);
+		otus_rx_dispatch(sc, tbuf + 4, clen);
+
+		/*
+		 * Move to next frame, skipping the DWORD stream header
+		 */
+		tbuf += wlen + 4;
+		tlen -= wlen + 4;
+	}
+
+	/* XXX what's left in the buffer? */
+
+	/* Consume mbuf */
+	m_freem(m);
+}
+
+/*
+ * USB data pipeline completion routines.
+ */
 
 static void
 otus_bulk_tx_callback(struct usb_xfer *xfer, usb_error_t error)
@@ -608,27 +808,12 @@ otus_bulk_tx_callback(struct usb_xfer *xfer, usb_error_t error)
 }
 
 static void
-otus_dump_usb_rx_page(struct otus_softc *sc, struct usb_page_cache *pc,
-    int actlen)
-{
-	char buf[128];
-	int i;
-
-	usbd_copy_out(pc, 0, buf, MIN(actlen, 128));
-	device_printf(sc->sc_dev, "USBRX:");
-	for (i = 0; i < MIN(actlen, 128); i++) {
-		printf(" %02x", buf[i] & 0xff);
-	}
-	printf("\n");
-}
-
-static void
 otus_bulk_rx_callback(struct usb_xfer *xfer, usb_error_t error)
 {
 	struct otus_softc *sc = usbd_xfer_softc(xfer);
 	int actlen;
 	int sumlen;
-	struct usb_page_cache *pc;
+	struct mbuf *m;
 
 	usbd_xfer_status(xfer, &actlen, &sumlen, NULL, NULL);
 	DPRINTF(sc, OTUS_DEBUG_USB_XFER,
@@ -648,8 +833,11 @@ otus_bulk_rx_callback(struct usb_xfer *xfer, usb_error_t error)
 		    "%s: comp; %d bytes\n",
 		    __func__,
 		    actlen);
-		pc = usbd_xfer_get_frame(xfer, 0);
-		otus_dump_usb_rx_page(sc, pc, actlen);
+
+		m = sc->sc_rx_m;
+		sc->sc_rx_m = NULL;
+
+		otus_rx_frame(sc, m, actlen);
 
 		/* XXX fallthrough */
 
@@ -660,7 +848,23 @@ otus_bulk_rx_callback(struct usb_xfer *xfer, usb_error_t error)
 		DPRINTF(sc, OTUS_DEBUG_USB_XFER,
 		    "%s: setup\n",
 		    __func__);
-		usbd_xfer_set_frame_len(xfer, 0, usbd_xfer_max_len(xfer));
+
+		/*
+		 * If there's already an mbuf, use it.
+		 *
+		 * XXX temporary! I need to correctly populate
+		 * RX mbuf chains elsewhere!
+		 */
+		if (sc->sc_rx_m == NULL) {
+			sc->sc_rx_m = m_getcl(M_DONTWAIT, MT_DATA, M_PKTHDR);
+			if (sc->sc_rx_m == NULL)
+				break;
+		}
+
+		usbd_xfer_set_frame_data(xfer, 0,
+		    mtod(sc->sc_rx_m, uint8_t *),
+		    usbd_xfer_max_len(xfer));
+
 		usbd_transfer_submit(xfer);
 		break;
 
@@ -747,7 +951,6 @@ otus_bulk_irq_callback(struct usb_xfer *xfer, usb_error_t error)
 	struct otus_softc *sc = usbd_xfer_softc(xfer);
 	int actlen;
 	int sumlen;
-	struct usb_page_cache *pc;
 
 	usbd_xfer_status(xfer, &actlen, &sumlen, NULL, NULL);
 	DPRINTF(sc, OTUS_DEBUG_USB_XFER,
@@ -766,8 +969,10 @@ otus_bulk_irq_callback(struct usb_xfer *xfer, usb_error_t error)
 		    "%s: comp; %d bytes\n",
 		    __func__,
 		    actlen);
+#if 0
 		pc = usbd_xfer_get_frame(xfer, 0);
 		otus_dump_usb_rx_page(sc, pc, actlen);
+#endif
 		/* XXX fallthrough */
 	case USB_ST_SETUP:
 		/*

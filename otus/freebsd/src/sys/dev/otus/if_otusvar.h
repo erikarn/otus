@@ -54,6 +54,9 @@ struct otus_softc {
 	otus_cmdhead		sc_cmd_inactive;
 	otus_cmdhead		sc_cmd_pending;
 	otus_cmdhead		sc_cmd_waiting;
+
+	/* Receive handling */
+	struct mbuf		*sc_rx_m;
 };
 
 #endif	/* __IF_OTUSVAR__ */
