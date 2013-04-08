@@ -46,6 +46,8 @@ struct otus_softc {
 	struct carl9170_firmware_info	fwinfo;
 	uint64_t		sc_debug;
 
+	struct callout		sc_ping_callout;
+
 	/* Command queue handling */
 	struct otus_cmd		sc_cmd[OTUS_CMD_LIST_COUNT];
 	otus_cmdhead		sc_cmd_active;

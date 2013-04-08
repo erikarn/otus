@@ -118,24 +118,24 @@ static int		otus_detach(device_t self);
 static const struct usb_config otus_config[OTUS_N_XFER] = {
 	[OTUS_BULK_TX] = {
 	.type = UE_BULK,
-	.endpoint = 1,
+	.endpoint = UE_ADDR_ANY,
 	.direction = UE_DIR_OUT,
-	.bufsize = OTUS_MAX_TXSZ,
+	.bufsize = 0x200,
 	.flags = {.pipe_bof = 1,.force_short_xfer = 1,},
 	.callback = otus_bulk_tx_callback,
 	.timeout = 5000,        /* ms */
 	},
 	[OTUS_BULK_RX] = {
 	.type = UE_BULK,
-	.endpoint = 2,
+	.endpoint = UE_ADDR_ANY,
 	.direction = UE_DIR_IN,
-	.bufsize = OTUS_MAX_RXSZ,
+	.bufsize = 0x200,
 	.flags = {.pipe_bof = 1,.short_xfer_ok = 1,},
 	.callback = otus_bulk_rx_callback,
 	},
 	[OTUS_BULK_IRQ] = {
 	.type = UE_INTERRUPT,
-	.endpoint = 3,
+	.endpoint = UE_ADDR_ANY,
 	.direction = UE_DIR_IN,
 	.bufsize = OTUS_MAX_CTRLSZ,
 	.flags = {.pipe_bof = 1,.short_xfer_ok = 1,},
@@ -143,7 +143,7 @@ static const struct usb_config otus_config[OTUS_N_XFER] = {
 	},
 	[OTUS_BULK_CMD] = {
 	.type = UE_INTERRUPT,
-	.endpoint = 4,
+	.endpoint = UE_ADDR_ANY,
 	.direction = UE_DIR_OUT,
 	.bufsize = OTUS_MAX_CTRLSZ,
 	.flags = {.pipe_bof = 1,.force_short_xfer = 1,},
@@ -250,20 +250,13 @@ otus_cmdsend(struct otus_softc *sc, uint32_t code, const void *idata,
 	usbd_transfer_start(sc->sc_xfer[OTUS_BULK_CMD]);
 
 	/*
-	 * XXX check to see whether command responses come in the
-	 * IRQ or RX queue.
-	 *
-	 * XXX TODO: It looks like it's actually pushing the command
-	 * response into the RX queue, not the IRQ queue.
-	 *
-	 * So I'm going to have to dig deeper into this and figure
-	 * out the best way to separate command responses and
-	 * receive frames.
+	 * Command responses come in on the RX queue, so we need
+	 * to prep that.
 	 */
 	if (cmd->flags & OTUS_CMD_FLAG_READ) {
-		/* XXX enable both for now, just to see what happens */
-		usbd_transfer_start(sc->sc_xfer[OTUS_BULK_IRQ]);
-		usbd_transfer_start(sc->sc_xfer[OTUS_BULK_RX]);
+		/* XXX why do I need both? */
+//		usbd_transfer_start(sc->sc_xfer[OTUS_BULK_RX]);
+//		usbd_transfer_start(sc->sc_xfer[OTUS_BULK_IRQ]);
 
 		/*
 		 * For now, let's not support synchronous command
@@ -446,6 +439,14 @@ otus_load_microcode(struct otus_softc *sc)
 	return (0);
 }
 
+static void
+if_otus_ping_callout(void *arg)
+{
+	struct otus_softc *sc = arg;
+	(void) otus_cmd_send_ping(sc, 0x89abcdef);
+	callout_reset(&sc->sc_ping_callout, 500, if_otus_ping_callout, sc);
+}
+
 static int
 otus_attach(device_t dev)
 {
@@ -491,6 +492,8 @@ otus_attach(device_t dev)
 	 */
 	if_otus_sysctl_attach(sc);
 
+	sc->sc_debug = 0xffffffffUL;
+
 	/*
 	 * XXX Can we do a detach at any point? Ie, can we defer the
 	 * XXX rest of this setup path and if attach fails, just
@@ -512,9 +515,23 @@ otus_attach(device_t dev)
 	if (error != 0)
 		goto detach;
 
-	/* XXX doing a ping here is likely evil (we're in probe/attach!) .. */
+	/* Periodic ping */
+	callout_init_mtx(&sc->sc_ping_callout, &sc->sc_mtx, 0);
+
 	OTUS_LOCK(sc);
+
+
+	/*
+	 * Start off the receive paths.
+	 */
+	usbd_transfer_start(sc->sc_xfer[OTUS_BULK_RX]);
+	usbd_transfer_start(sc->sc_xfer[OTUS_BULK_IRQ]);
+
+	/* XXX doing a ping here is likely evil (we're in probe/attach!) .. */
 	(void) otus_cmd_send_ping(sc, 0x89abcdef);
+
+	/* And whilst we're here .. */
+	callout_reset(&sc->sc_ping_callout, 1000, if_otus_ping_callout, sc);
 	OTUS_UNLOCK(sc);
 
 	/* XXX read eeprom, device setup, etc */
@@ -536,6 +553,7 @@ otus_detach(device_t dev)
 	struct otus_softc *sc = device_get_softc(dev);
 
 	OTUS_LOCK(sc);
+	callout_drain(&sc->sc_ping_callout);
 	/*
 	 * Free command list.
 	 */
@@ -628,7 +646,8 @@ otus_bulk_rx_callback(struct usb_xfer *xfer, usb_error_t error)
 		    __func__);
 		usbd_xfer_set_frame_len(xfer, 0, usbd_xfer_max_len(xfer));
 		usbd_transfer_submit(xfer);
-	break;
+
+		/* XXX fallthrough */
 
 	case USB_ST_TRANSFERRED:
 		/*
@@ -648,6 +667,7 @@ otus_bulk_rx_callback(struct usb_xfer *xfer, usb_error_t error)
 		 * Print error message and clear stall
 		 * for example.
 		 */
+		device_printf(sc->sc_dev, "%s: ERROR?\n", __func__);
 		break;
 	}
 }
@@ -715,6 +735,10 @@ otus_bulk_cmd_callback(struct usb_xfer *xfer, usb_error_t error)
 }
 
 
+/*
+ * This isn't used by carl9170; it however may be used by the
+ * initial bootloader.
+ */
 static void
 otus_bulk_irq_callback(struct usb_xfer *xfer, usb_error_t error)
 {
@@ -724,7 +748,7 @@ otus_bulk_irq_callback(struct usb_xfer *xfer, usb_error_t error)
 	struct usb_page_cache *pc;
 
 	usbd_xfer_status(xfer, &actlen, &sumlen, NULL, NULL);
-	device_printf(sc->sc_dev,
+	DPRINTF(sc, OTUS_DEBUG_USB_XFER,
 	    "%s: called; state=%d\n",
 	    __func__,
 	    USB_GET_STATE(xfer));
@@ -734,10 +758,12 @@ otus_bulk_irq_callback(struct usb_xfer *xfer, usb_error_t error)
 		/*
 		 * Setup xfer frame lengths/count and data
 		 */
-		device_printf(sc->sc_dev, "%s: setup\n", __func__);
+		DPRINTF(sc, OTUS_DEBUG_USB_XFER,
+		    "%s: setup\n", __func__);
 		usbd_xfer_set_frame_len(xfer, 0, usbd_xfer_max_len(xfer));
 		usbd_transfer_submit(xfer);
-		break;
+
+		/* XXX fallthrough */
 
 	case USB_ST_TRANSFERRED:
 		/*
@@ -745,7 +771,8 @@ otus_bulk_irq_callback(struct usb_xfer *xfer, usb_error_t error)
 		 * "actlen" has the total length for all frames
 		 * transferred.
 		 */
-		device_printf(sc->sc_dev, "%s: comp; %d bytes\n",
+		DPRINTF(sc, OTUS_DEBUG_USB_XFER,
+		    "%s: comp; %d bytes\n",
 		    __func__,
 		    actlen);
 		pc = usbd_xfer_get_frame(xfer, 0);
@@ -756,6 +783,7 @@ otus_bulk_irq_callback(struct usb_xfer *xfer, usb_error_t error)
 		 * Print error message and clear stall
 		 * for example.
 		 */
+		device_printf(sc->sc_dev, "%s: ERROR?\n", __func__);
 		break;
 	}
 }
