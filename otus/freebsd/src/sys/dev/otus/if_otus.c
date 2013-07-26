@@ -251,13 +251,12 @@ otus_cmdsend(struct otus_softc *sc, uint32_t code, const void *idata,
 	usbd_transfer_start(sc->sc_xfer[OTUS_BULK_CMD]);
 
 	/*
-	 * Command responses come in on the RX queue, so we need
-	 * to prep that.
+	 * carl9170 posts responses on the RX queue (interspersed with
+	 * data) and that's already running, so just add it to the
+	 * queue.
 	 */
 	if (cmd->flags & OTUS_CMD_FLAG_READ) {
-		/* XXX why do I need both? */
-//		usbd_transfer_start(sc->sc_xfer[OTUS_BULK_RX]);
-//		usbd_transfer_start(sc->sc_xfer[OTUS_BULK_IRQ]);
+		usbd_transfer_start(sc->sc_xfer[OTUS_BULK_RX]);
 
 		/*
 		 * For now, let's not support synchronous command
@@ -581,6 +580,17 @@ otus_detach(device_t dev)
  * Receive dispatch routines.
  */
 
+
+/*
+ * Process a single receive frame.
+ *
+ * XXX I really would like to be able to pass in a real mbuf here
+ * and seek into it; however due to how the carl9170 firmware works
+ * it isn't easy to do.
+ *
+ * So, for now, create a new mbuf based on this particular extent
+ * and worry about optimising things later.
+ */
 static void
 otus_rx_data(struct otus_softc *sc, const uint8_t *buf, int len)
 {
@@ -601,8 +611,50 @@ otus_check_sequence(struct otus_softc *sc, uint8_t seq)
 	return (0);
 }
 
+#if 0
 /*
- * XXX from carl9170
+ * Handle a single command response.
+ *
+ * If a command response was due to a queued command
+ * that we have a sleeping requestor on, ensure that
+ * we copy in the response and then wake up the caller.
+ */
+static void
+otus_handle_cmd_response(struct otus_softc *sc, const uint8_t *buf,
+    int len)
+{
+	const struct carl9170_rsp *cmd;
+
+	cmd = (const struct carl9170_rsp *) cmd;
+
+	DPRINTF(sc, OTUS_DEBUG_RECV_STREAM,
+	    "%s: code=%d, len=%d\n",
+	    __func__,
+	    cmd->hdr.h.c.cmd,
+	    cmd->hdr.h.c.len);
+
+	/*
+	 * For now, just ignore handling non-response
+	 * messages
+	 */
+	if ((cmd->hdr.h.c.cmd & CARL9170_RSP_FLAG) == 0)
+		return;
+
+	/*
+	 * In theory we should see a completion for each
+	 * message that we have queued, in the order that
+	 * we queued them.
+	 *
+	 * .. In practice?
+	 */
+}
+#endif
+
+/*
+ * Loop over the RX command in this payload and handle each one.
+ *
+ * Some will be respones to queued commands and those must be
+ * matched up against pending commands.
  */
 static void
 otus_rx_cmds(struct otus_softc *sc, const uint8_t *buf, uint8_t len)
@@ -611,7 +663,6 @@ otus_rx_cmds(struct otus_softc *sc, const uint8_t *buf, uint8_t len)
 	int i = 0;
 
 	OTUS_LOCK_ASSERT(sc);
-
 
 	while (i < len) {
 		cmd = (const struct carl9170_rsp *) &buf[i];
@@ -623,22 +674,24 @@ otus_rx_cmds(struct otus_softc *sc, const uint8_t *buf, uint8_t len)
 		if (otus_check_sequence(sc, cmd->hdr.h.c.seq))
 			break;
 
-		device_printf(sc->sc_dev,
-		    "%s: code=%d, len=%d\n",
-		    __func__,
-		    cmd->hdr.h.c.cmd,
-		    cmd->hdr.h.c.len);
 #if 0
                 carl9170_handle_command_response(ar, cmd, cmd->hdr.len + 4);
 #endif
 	}
 
-#if 0
+	/*
+	 * If we parsed everything - great. Otherwise log an error.
+	 */
 	if (i == len)
 		return;
 
-	/* XXX should log an error */
-#endif
+	/*
+	 * XXX Should pass an error back up the stack!
+	 */
+	device_printf(sc->sc_dev,
+	    "%s: %d bytes left whilst decoding responses!\n",
+	    __func__,
+	    len - i);
 }
 
 /*
@@ -746,7 +799,7 @@ otus_rx_frame(struct otus_softc *sc, struct mbuf *m, int len)
 		/*
 		 * Punt it up.
 		 */
-		device_printf(sc->sc_dev,
+		DPRINTF(sc, OTUS_DEBUG_RECV_STREAM,
 		    "%s: valid tag! clen=%d, wlen=%d\n",
 		    __func__,
 		    clen,
@@ -837,6 +890,11 @@ otus_bulk_rx_callback(struct usb_xfer *xfer, usb_error_t error)
 		m = sc->sc_rx_m;
 		sc->sc_rx_m = NULL;
 
+		/*
+		 * This decodes the RX stream and figures out which
+		 * frames are commands, which are responses and which
+		 * are RX frames.
+		 */
 		otus_rx_frame(sc, m, actlen);
 
 		/* XXX fallthrough */
