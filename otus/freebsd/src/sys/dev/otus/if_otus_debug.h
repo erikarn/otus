@@ -21,6 +21,7 @@ enum {
 	OTUS_DEBUG_CRYPTO	= 0x00010000ULL,	/* crypto */
 	OTUS_DEBUG_LED		= 0x00020000ULL,	/* LED */
 	OTUS_DEBUG_USB_XFER	= 0x00040000ULL,	/* USB transactions */
+	OTUS_DEBUG_RECV_STREAM	= 0x00080000ULL,	/* RX stream decoding */
 	OTUS_DEBUG_ANY		= 0xffffffffffffffffULL
 };
 #define DPRINTF(sc, m, fmt, ...) do {			\
