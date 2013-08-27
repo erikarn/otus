@@ -205,10 +205,6 @@ otus_get_next_cmdbuf(struct otus_softc *sc)
 
 	return (cmd);
 }
-#if 0
-                usbd_xfer_set_frame_data(xfer, 0, cmd->buf, cmd->buflen);
-                usbd_transfer_submit(xfer);
-#endif
 
 #if 0
 /*

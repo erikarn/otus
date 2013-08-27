@@ -611,7 +611,6 @@ otus_check_sequence(struct otus_softc *sc, uint8_t seq)
 	return (0);
 }
 
-#if 0
 /*
  * Handle a single command response.
  *
@@ -620,12 +619,12 @@ otus_check_sequence(struct otus_softc *sc, uint8_t seq)
  * we copy in the response and then wake up the caller.
  */
 static void
-otus_handle_cmd_response(struct otus_softc *sc, const uint8_t *buf,
-    int len)
+otus_handle_cmd_response(struct otus_softc *sc,
+    const struct carl9170_rsp *cmd)
 {
-	const struct carl9170_rsp *cmd;
-
-	cmd = (const struct carl9170_rsp *) cmd;
+	OTUS_LOCK_ASSERT(sc);
+	struct carl9170_cmd_head *hdr;
+	struct otus_cmd *c;
 
 	DPRINTF(sc, OTUS_DEBUG_RECV_STREAM,
 	    "%s: code=%d, len=%d\n",
@@ -637,18 +636,44 @@ otus_handle_cmd_response(struct otus_softc *sc, const uint8_t *buf,
 	 * For now, just ignore handling non-response
 	 * messages
 	 */
-	if ((cmd->hdr.h.c.cmd & CARL9170_RSP_FLAG) == 0)
+	if ((cmd->hdr.h.c.cmd & CARL9170_RSP_FLAG) == 0) {
+		device_printf(sc->sc_dev,
+		    "%s: not a response; likely an announcement!\n",
+		    __func__);
 		return;
+	}
 
 	/*
-	 * In theory we should see a completion for each
-	 * message that we have queued, in the order that
-	 * we queued them.
-	 *
-	 * .. In practice?
+	 * XXX put in if_otus_cmd.[ch] !
 	 */
+	c = STAILQ_FIRST(&sc->sc_cmd_waiting);
+	if (c == NULL) {
+		device_printf(sc->sc_dev,
+		    "%s: response but with no buffer waiting!\n",
+		    __func__);
+		return;
+	}
+
+	/*
+	 * Pop it.
+	 */
+	STAILQ_REMOVE_HEAD(&sc->sc_cmd_waiting, next);
+	OTUS_STAT_DEC(sc, sc_cmd_waiting);
+
+	/*
+	 * Sanity check!
+	 */
+	hdr = (struct carl9170_cmd_head *) c->buf;
+	device_printf(sc->sc_dev,
+	    "%s: req cmd=%d, len=%d, seq=%d; resp cmd=%d, len=%d, seq=%d\n",
+	    __func__,
+	    cmd->hdr.h.c.cmd,
+	    cmd->hdr.h.c.len,
+	    cmd->hdr.h.c.seq,
+	    hdr->h.c.cmd,
+	    hdr->h.c.len,
+	    hdr->h.c.seq);
 }
-#endif
 
 /*
  * Loop over the RX command in this payload and handle each one.
@@ -674,9 +699,7 @@ otus_rx_cmds(struct otus_softc *sc, const uint8_t *buf, uint8_t len)
 		if (otus_check_sequence(sc, cmd->hdr.h.c.seq))
 			break;
 
-#if 0
-                carl9170_handle_command_response(ar, cmd, cmd->hdr.len + 4);
-#endif
+		otus_handle_cmd_response(sc, cmd);
 	}
 
 	/*
