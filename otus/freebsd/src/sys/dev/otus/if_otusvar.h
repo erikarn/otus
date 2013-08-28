@@ -47,6 +47,10 @@ struct otus_softc {
 	uint64_t		sc_debug;
 
 	struct callout		sc_ping_callout;
+	struct taskqueue	*sc_tq;
+
+	/* Ping task - needs to be a taskqueue so we can sleep */
+	struct task		sc_ping_task;
 
 	/* Command queue handling */
 	struct otus_cmd		sc_cmd[OTUS_CMD_LIST_COUNT];
@@ -54,6 +58,7 @@ struct otus_softc {
 	otus_cmdhead		sc_cmd_inactive;
 	otus_cmdhead		sc_cmd_pending;
 	otus_cmdhead		sc_cmd_waiting;
+	int			sc_cur_rxcmdseq;
 
 	/* Receive handling */
 	struct mbuf		*sc_rx_m;

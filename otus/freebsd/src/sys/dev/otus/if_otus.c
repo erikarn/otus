@@ -184,7 +184,7 @@ otus_cmdsend(struct otus_softc *sc, uint32_t code, const void *idata,
 {
 	struct carl9170_cmd_head *hdr;
 	struct otus_cmd *cmd;
-//	int error;
+	int error;
 
 	OTUS_LOCK_ASSERT(sc);
 
@@ -265,7 +265,6 @@ otus_cmdsend(struct otus_softc *sc, uint32_t code, const void *idata,
 		 * I'll look into supporting this in a more generic
 		 * fashion later.
 		 */
-#if 0
                 /* wait at most two seconds for command reply */
                 error = mtx_sleep(cmd, &sc->sc_mtx, 0, "otuscmd", 2 * hz);
                 cmd->odata = NULL;      /* in case reply comes too late */
@@ -279,7 +278,6 @@ otus_cmdsend(struct otus_softc *sc, uint32_t code, const void *idata,
                         error = EINVAL;
                 }
                 return (error);
-#endif
 	}
 	return (0);
 }
@@ -332,6 +330,11 @@ otus_cmd_send_ping(struct otus_softc *sc, uint32_t value)
 //		return (EIO);
 		return (0);
 	}
+
+	device_printf(sc->sc_dev, "%s: PING: OK! sent 0x%08x, got 0x%08x\n",
+	    __func__,
+	    value,
+	    retval);
 
 	return (0);
 }
@@ -443,8 +446,19 @@ static void
 if_otus_ping_callout(void *arg)
 {
 	struct otus_softc *sc = arg;
+
+	taskqueue_enqueue(sc->sc_tq, &sc->sc_ping_task);
+}
+
+static void
+otus_ping_task(void *arg, int npending)
+{
+	struct otus_softc *sc = arg;
+
+	OTUS_LOCK(sc);
 	(void) otus_cmd_send_ping(sc, 0x89abcdef);
 	callout_reset(&sc->sc_ping_callout, 500, if_otus_ping_callout, sc);
+	OTUS_UNLOCK(sc);
 }
 
 static int
@@ -515,6 +529,13 @@ otus_attach(device_t dev)
 	if (error != 0)
 		goto detach;
 
+	/* Taskqueue */
+	sc->sc_tq = taskqueue_create("otus_taskq", M_NOWAIT,
+	    taskqueue_thread_enqueue, &sc->sc_tq);
+	/* XXX should be using ifp for the taskq name */
+	taskqueue_start_threads(&sc->sc_tq, 1, PI_NET, "%s taskq", "otus");
+	TASK_INIT(&sc->sc_ping_task, 0, otus_ping_task, sc);
+
 	/* Periodic ping */
 	callout_init_mtx(&sc->sc_ping_callout, &sc->sc_mtx, 0);
 
@@ -553,7 +574,16 @@ otus_detach(device_t dev)
 	struct otus_softc *sc = device_get_softc(dev);
 
 	OTUS_LOCK(sc);
+
 	callout_drain(&sc->sc_ping_callout);
+	if (sc->sc_tq)
+		taskqueue_free(sc->sc_tq);
+
+	/*
+	 * XXX TODO: wakeup sleeping/waiting locks; give it time
+	 * to actively fail before wrapping up detach?
+	 */
+
 	/*
 	 * Free command list.
 	 */
@@ -623,7 +653,7 @@ otus_handle_cmd_response(struct otus_softc *sc,
     const struct carl9170_rsp *cmd)
 {
 	OTUS_LOCK_ASSERT(sc);
-	struct carl9170_cmd_head *hdr;
+	struct carl9170_cmd *hdr;
 	struct otus_cmd *c;
 
 	DPRINTF(sc, OTUS_DEBUG_RECV_STREAM,
@@ -633,13 +663,19 @@ otus_handle_cmd_response(struct otus_softc *sc,
 	    cmd->hdr.h.c.len);
 
 	/*
-	 * For now, just ignore handling non-response
+	 * If the RSP flags don't match, treat the message
+	 * as an announcement.  Punt it elsewhere.
+	 */
+
+	/*
+	 * XXX For now, just ignore handling non-response
 	 * messages
 	 */
-	if ((cmd->hdr.h.c.cmd & CARL9170_RSP_FLAG) == 0) {
+	if (cmd->hdr.h.c.cmd & CARL9170_RSP_FLAG) {
 		device_printf(sc->sc_dev,
-		    "%s: not a response; likely an announcement!\n",
-		    __func__);
+		    "%s: ignoring async message! (0x%x)\n",
+		    __func__,
+		    cmd->hdr.h.c.cmd);
 		return;
 	}
 
@@ -659,20 +695,46 @@ otus_handle_cmd_response(struct otus_softc *sc,
 	 */
 	STAILQ_REMOVE_HEAD(&sc->sc_cmd_waiting, next);
 	OTUS_STAT_DEC(sc, sc_cmd_waiting);
+	hdr = (struct carl9170_cmd *) c->buf;
 
 	/*
-	 * Sanity check!
+	 * Debug.
 	 */
-	hdr = (struct carl9170_cmd_head *) c->buf;
 	device_printf(sc->sc_dev,
-	    "%s: req cmd=%d, len=%d, seq=%d; resp cmd=%d, len=%d, seq=%d\n",
+	    "%s: resp cmd=%d, len=%d, seq=%d; req cmd=%d, len=%d, seq=%d\n",
 	    __func__,
 	    cmd->hdr.h.c.cmd,
 	    cmd->hdr.h.c.len,
 	    cmd->hdr.h.c.seq,
-	    hdr->h.c.cmd,
-	    hdr->h.c.len,
-	    hdr->h.c.seq);
+	    hdr->hdr.h.c.cmd,
+	    hdr->hdr.h.c.len,
+	    hdr->hdr.h.c.seq);
+
+	/*
+	 * Sanity check - command and sequence numbers need to match.
+	 */
+	/* XXX check for dropped sequence number (sc_cur_rxcmdseq) */
+
+	/* XXX Check that the response code matches */
+	if (cmd->hdr.h.c.cmd != hdr->hdr.h.c.cmd) {
+		device_printf(sc->sc_dev,
+		    "%s: mis-matched commands! (%d != %d)\n",
+		    __func__,
+		    cmd->hdr.h.c.cmd,
+		    hdr->hdr.h.c.cmd);
+	} else if (c->odata != NULL) {
+		/* Matched? Copy the payload */
+		/* XXX flag if the received payload is too big? */
+		memcpy(c->odata, &hdr->c.data,
+		    MIN(hdr->hdr.h.c.len, c->olen));
+	}
+
+	/* Wakeup the listener */
+	wakeup_one(c);
+
+	/* Return to the inactive queue */
+	STAILQ_INSERT_TAIL(&sc->sc_cmd_inactive, c, next);
+	OTUS_STAT_INC(sc, sc_cmd_inactive);
 }
 
 /*
