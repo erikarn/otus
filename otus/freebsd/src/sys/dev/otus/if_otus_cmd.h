@@ -30,5 +30,6 @@ extern	void otus_free_cmd_list(struct otus_softc *sc,
 extern	struct otus_cmd * otus_get_cmdbuf(struct otus_softc *sc);
 extern	int otus_comp_cmdbuf(struct otus_softc *sc);
 extern	struct otus_cmd * otus_get_next_cmdbuf(struct otus_softc *sc);
+extern	void otus_wakeup_waiting_list(struct otus_softc *sc);
 
 #endif /* __IF_OTUS_CMD_H__ */

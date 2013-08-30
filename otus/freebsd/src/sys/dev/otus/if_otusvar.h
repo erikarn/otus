@@ -45,6 +45,7 @@ struct otus_softc {
 	struct usb_xfer		*sc_xfer[OTUS_N_XFER];
 	struct carl9170_firmware_info	fwinfo;
 	uint64_t		sc_debug;
+	int			sc_detaching;	/* About to detach */
 
 	struct callout		sc_ping_callout;
 	struct taskqueue	*sc_tq;

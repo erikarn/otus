@@ -129,6 +129,26 @@ fail:   otus_free_cmd_list(sc, cmds, ncmd);
 	return (error);
 }
 
+void
+otus_wakeup_waiting_list(struct otus_softc *sc)
+{
+
+	struct otus_cmd *c;
+
+	OTUS_LOCK_ASSERT(sc);
+
+	while ( (c = STAILQ_FIRST(&sc->sc_cmd_pending)) != NULL) {
+		STAILQ_REMOVE_HEAD(&sc->sc_cmd_pending, next);
+		OTUS_STAT_DEC(sc, st_cmd_pending);
+
+		/* Wake up the sleepers */
+		wakeup(c);
+
+		STAILQ_INSERT_TAIL(&sc->sc_cmd_inactive, c, next);
+		OTUS_STAT_INC(sc, st_cmd_inactive);
+	}
+}
+
 struct otus_cmd *
 otus_get_cmdbuf(struct otus_softc *sc)
 {

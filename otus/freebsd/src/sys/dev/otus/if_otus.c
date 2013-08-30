@@ -447,6 +447,11 @@ if_otus_ping_callout(void *arg)
 {
 	struct otus_softc *sc = arg;
 
+	/* Detaching? Don't bother running. */
+	if (sc->sc_detaching) {
+		return;
+	}
+
 	taskqueue_enqueue(sc->sc_tq, &sc->sc_ping_task);
 }
 
@@ -456,6 +461,13 @@ otus_ping_task(void *arg, int npending)
 	struct otus_softc *sc = arg;
 
 	OTUS_LOCK(sc);
+
+	/* Detaching? Don't bother running. */
+	if (sc->sc_detaching) {
+		OTUS_UNLOCK(sc);
+		return;
+	}
+
 	(void) otus_cmd_send_ping(sc, 0x89abcdef);
 	callout_reset(&sc->sc_ping_callout, 500, if_otus_ping_callout, sc);
 	OTUS_UNLOCK(sc);
@@ -573,16 +585,63 @@ otus_detach(device_t dev)
 {
 	struct otus_softc *sc = device_get_softc(dev);
 
+	/*
+	 * Time to tear things down, so we should now signal
+	 * any parallel-running things (like ioctls) that they
+	 * should not start running, then wake up any of the
+	 * things waiting for commands.
+	 */
 	OTUS_LOCK(sc);
-
-	callout_drain(&sc->sc_ping_callout);
-	if (sc->sc_tq)
-		taskqueue_free(sc->sc_tq);
+	sc->sc_detaching = 1;
 
 	/*
-	 * XXX TODO: wakeup sleeping/waiting locks; give it time
-	 * to actively fail before wrapping up detach?
+	 * Wake up any commands that are currently pending;
+	 * move them to the inactive list so they're freed.
+	 *
+	 * XXX TODO!
 	 */
+	otus_wakeup_waiting_list(sc);
+
+	/*
+	 * Now, drain the callouts so they don't occur any longer.
+	 */
+	callout_drain(&sc->sc_ping_callout);
+
+	/*
+	 * .. the taskqueue stuff has to happen outside of the
+	 * otus lock as it's not recursive.
+	 */
+	OTUS_UNLOCK(sc);
+
+	/*
+	 * Drain the taskqueue.  If the tasks are running then we'll
+	 * end up waiting until they complete.
+	 */
+	taskqueue_drain(sc->sc_tq, &sc->sc_ping_task);
+	/*
+	 * Free the taskqueue.
+	 */
+	taskqueue_free(sc->sc_tq);
+
+	/* XXX net80211 tasks? */
+
+	/*
+	 * Next, we need to ensure that any pending TX/RX, ioctls,
+	 * net80211 callbacks and such are properly wrapped up.
+	 *
+	 * XXX TODO!
+	 */
+
+	/*
+	 * Ok, so now we re-acquire the lock.  The taskqueues,
+	 * callouts, TX/RX processing, net80211 callbacks,
+	 * various other bits and pieces should all (a) be
+	 * done or (b) hit the lock, seen we're detaching
+	 * and just quit out. So we can finish wrapping up
+	 * the driver now.
+	 */
+
+	OTUS_LOCK(sc);
 
 	/*
 	 * Free command list.
@@ -590,14 +649,20 @@ otus_detach(device_t dev)
 	otus_free_cmd_list(sc, sc->sc_cmd, OTUS_CMD_LIST_COUNT);
 
 	/*
-	 * Free mbuf
+	 * Free staging RX mbuf.
 	 */
 	if (sc->sc_rx_m != NULL)
 		m_freem(sc->sc_rx_m);
 	OTUS_UNLOCK(sc);
 
+	/*
+	 * Free the firmware state.
+	 */
 	otus_firmware_cleanup(&sc->fwinfo);
 
+	/*
+	 * Tear down the USB transfer endpoints.
+	 */
 	if (sc->sc_xfer != NULL)
 		usbd_transfer_unsetup(sc->sc_xfer, OTUS_N_XFER);
 
