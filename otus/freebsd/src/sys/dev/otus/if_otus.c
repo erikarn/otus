@@ -614,6 +614,12 @@ otus_detach(device_t dev)
 	OTUS_UNLOCK(sc);
 
 	/*
+	 * Tear down the USB transfer endpoints.
+	 */
+	if (sc->sc_xfer != NULL)
+		usbd_transfer_unsetup(sc->sc_xfer, OTUS_N_XFER);
+
+	/*
 	 * Drain the taskqueue.  If the tasks are running then we'll
 	 * end up waiting until they complete.
 	 */
@@ -659,12 +665,6 @@ otus_detach(device_t dev)
 	 * Free the firmware state.
 	 */
 	otus_firmware_cleanup(&sc->fwinfo);
-
-	/*
-	 * Tear down the USB transfer endpoints.
-	 */
-	if (sc->sc_xfer != NULL)
-		usbd_transfer_unsetup(sc->sc_xfer, OTUS_N_XFER);
 
 	device_printf(dev, "%s: called\n", __func__);
 	mtx_destroy(&sc->sc_mtx);
