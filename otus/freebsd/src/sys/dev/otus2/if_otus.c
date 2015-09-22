@@ -32,6 +32,7 @@
 #include <sys/rman.h>
 #include <sys/firmware.h>
 #include <sys/module.h>
+#include <sys/taskqueue.h>
 
 #include <machine/bus.h>
 #include <machine/resource.h>

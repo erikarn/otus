@@ -809,7 +809,7 @@ struct ar5416eeprom {
 #define OTUS_TXBUFSZ		(4 * 1024)
 
 /* Default EDCA parameters for when QoS is disabled. */
-static const struct ieee80211_edca_ac_params otus_edca_def[EDCA_NUM_AC] = {
+static const struct wmeParams otus_edca_def[WME_NUM_AC] = {
 	{ 4, 10, 3,  0 },
 	{ 4, 10, 7,  0 },
 	{ 3,  4, 2, 94 },
@@ -903,7 +903,6 @@ struct otus_host_cmd_ring {
 
 struct otus_node {
 	struct ieee80211_node		ni;
-	struct ieee80211_amrr_node	amn;
 	uint8_t				ridx[IEEE80211_RATE_MAXSIZE];
 };
 
@@ -918,14 +917,14 @@ struct otus_cmd_key {
 };
 
 struct otus_softc {
-	struct device			sc_dev;
 	struct ieee80211com		sc_ic;
+	device_t			sc_dev;
 	int				(*sc_newstate)(struct ieee80211com *,
 					    enum ieee80211_state, int);
 	void				(*sc_led_newstate)(struct otus_softc *);
 
-	struct usbd_device		*sc_udev;
-	struct usbd_interface		*sc_iface;
+	struct usb_device		*sc_udev;
+	struct usb_interface		*sc_iface;
 
 	struct ar5416eeprom		eeprom;
 	uint8_t				capflags;
@@ -945,10 +944,9 @@ struct otus_softc {
 
 	struct ieee80211_channel	*sc_curchan;
 
-	struct usb_task			sc_task;
-	struct timeout			scan_to;
-	struct timeout			calib_to;
-	struct ieee80211_amrr		amrr;
+	struct taskqueue		*sc_task;
+	struct callout			scan_to;
+	struct callout			calib_to;
 
 	int				write_idx;
 	int				tx_cur;
@@ -967,7 +965,6 @@ struct otus_softc {
 	struct otus_tx_data		tx_data[OTUS_TX_DATA_LIST_COUNT];
 	struct otus_rx_data		rx_data[OTUS_RX_DATA_LIST_COUNT];
 
-#if NBPFILTER > 0
 	caddr_t				sc_drvbpf;
 
 	union {
@@ -983,5 +980,4 @@ struct otus_softc {
 	}				sc_txtapu;
 #define sc_txtap	sc_txtapu.th
 	int				sc_txtap_len;
-#endif
 };
