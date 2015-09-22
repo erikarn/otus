@@ -1,16 +1,9 @@
 # $FreeBSD$
 
-.PATH: ${.CURDIR}/../../dev/otus
+.PATH: ${.CURDIR}/../../dev/otus2
 
 KMOD    = if_otus
-SRCS    = if_otus.c if_otus_firmware.c	\
-	  if_otus_firmware.h		\
-	  if_otusvar.h if_otusreg.h	\
-	  if_otus_cmd.c if_otus_cmd.h	\
-	  if_otus_sysctl.c if_otus_sysctl.h	\
-	  if_otus_debug.h		\
-	  fwdesc.h			\
-	  version.h			\
+SRCS    = if_otus.c if_otusreg.h	\
 	  bus_if.h device_if.h		\
 	  opt_bus.h opt_usb.h usb_if.h usbdevs.h
 
