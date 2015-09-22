@@ -951,24 +951,19 @@ enum {
 
 struct otus_softc {
 	struct ieee80211com		sc_ic;
+	struct mbufq			sc_snd;
 	device_t			sc_dev;
+	struct usb_device		*sc_udev;
 	int				(*sc_newstate)(struct ieee80211com *,
 					    enum ieee80211_state, int);
 	void				(*sc_led_newstate)(struct otus_softc *);
-
-	struct usb_device		*sc_udev;
-	struct usb_interface		*sc_iface;
+	struct usbd_interface		*sc_iface;
+	struct mtx			sc_mtx;
 
 	struct ar5416eeprom		eeprom;
 	uint8_t				capflags;
 	uint8_t				rxmask;
 	uint8_t				txmask;
-
-	struct usbd_pipe		*data_tx_pipe;
-	struct usbd_pipe		*data_rx_pipe;
-	struct usbd_pipe		*cmd_tx_pipe;
-	struct usbd_pipe		*cmd_rx_pipe;
-	uint8_t 			*ibuf;
 
 	int				sc_if_flags;
 	int				sc_tx_timer;
@@ -977,9 +972,9 @@ struct otus_softc {
 
 	struct ieee80211_channel	*sc_curchan;
 
-	struct taskqueue		*sc_task;
-	struct callout			scan_to;
-	struct callout			calib_to;
+	struct task			tx_task;
+	struct timeout_task		scan_to;
+	struct timeout_task		calib_to;
 
 	int				write_idx;
 	int				tx_cur;
@@ -998,7 +993,7 @@ struct otus_softc {
 	struct otus_tx_data		tx_data[OTUS_TX_DATA_LIST_COUNT];
 	struct otus_rx_data		rx_data[OTUS_RX_DATA_LIST_COUNT];
 
-	caddr_t				sc_drvbpf;
+	struct usb_xfer			*sc_xfer[OTUS_N_XFER];
 
 	union {
 		struct otus_rx_radiotap_header th;

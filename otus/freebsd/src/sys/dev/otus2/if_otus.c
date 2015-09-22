@@ -102,7 +102,7 @@ static device_probe_t otus_match;
 static device_attach_t otus_attach;
 static device_detach_t otus_detach;
 
-void		otus_attachhook(void *);
+static void		otus_attachhook(void *);
 void		otus_get_chanlist(struct otus_softc *);
 int		otus_load_firmware(struct otus_softc *, const char *,
 		    uint32_t);
@@ -114,8 +114,9 @@ int		otus_alloc_tx_data_list(struct otus_softc *);
 void		otus_free_tx_data_list(struct otus_softc *);
 int		otus_alloc_rx_data_list(struct otus_softc *);
 void		otus_free_rx_data_list(struct otus_softc *);
-void		otus_next_scan(void *);
+void		otus_next_scan(void *, int);
 void		otus_task(void *);
+static void	otus_tx_task(void *, int pending);
 void		otus_do_async(struct otus_softc *,
 		    void (*)(struct otus_softc *, void *), void *, int);
 int		otus_newstate(struct ieee80211com *, enum ieee80211_state,
@@ -130,11 +131,8 @@ int		otus_media_change(struct ifnet *);
 int		otus_read_eeprom(struct otus_softc *);
 void		otus_newassoc(struct ieee80211com *, struct ieee80211_node *,
 		    int);
-void		otus_intr(struct usbd_xfer *, void *, usbd_status);
 void		otus_cmd_rxeof(struct otus_softc *, uint8_t *, int);
 void		otus_sub_rxeof(struct otus_softc *, uint8_t *, int);
-void		otus_rxeof(struct usbd_xfer *, void *, usbd_status);
-void		otus_txeof(struct usbd_xfer *, void *, usbd_status);
 int		otus_tx(struct otus_softc *, struct mbuf *,
 		    struct ieee80211_node *);
 void		otus_start(struct ifnet *);
@@ -162,14 +160,14 @@ void		otus_set_key_cb(struct otus_softc *, void *);
 void		otus_delete_key(struct ieee80211com *, struct ieee80211_node *,
 		    struct ieee80211_key *);
 void		otus_delete_key_cb(struct otus_softc *, void *);
-void		otus_calibrate_to(void *);
+void		otus_calibrate_to(void *, int);
 int		otus_set_bssid(struct otus_softc *, const uint8_t *);
 int		otus_set_macaddr(struct otus_softc *, const uint8_t *);
 void		otus_led_newstate_type1(struct otus_softc *);
 void		otus_led_newstate_type2(struct otus_softc *);
 void		otus_led_newstate_type3(struct otus_softc *);
-int		otus_init(struct ifnet *);
-void		otus_stop(struct ifnet *);
+int		otus_init(struct otus_softc *sc);
+void		otus_stop(struct otus_softc *sc);
 
 static device_method_t otus_methods[] = {
 	DEVMETHOD(device_probe,         otus_match),
@@ -235,7 +233,7 @@ static const struct usb_config otus_config[OTUS_N_XFER] = {
 	},
 };
 
-int
+static int
 otus_match(device_t self)
 {
 	struct usb_attach_arg *uaa = device_get_ivars(self);
@@ -248,80 +246,85 @@ otus_match(device_t self)
 	return (usbd_lookup_id_by_uaa(otus_devs, sizeof(otus_devs), uaa));
 }
 
-void
-otus_attach(struct device *parent, struct device *self, void *aux)
+static int
+otus_attach(device_t self)
 {
-	struct otus_softc *sc = (struct otus_softc *)self;
-	struct usb_attach_arg *uaa = aux;
+	struct usb_attach_arg *uaa = device_get_ivars(self);
+	struct otus_softc *sc = device_get_softc(self);
 	int error;
+	uint8_t iface_index;
 
+	device_set_usb_desc(self);
 	sc->sc_udev = uaa->device;
+	sc->sc_dev = self;
 
-	usb_init_task(&sc->sc_task, otus_task, sc, USB_TASK_TYPE_GENERIC);
-	timeout_set(&sc->scan_to, otus_next_scan, sc);
-	timeout_set(&sc->calib_to, otus_calibrate_to, sc);
+	mtx_init(&sc->sc_mtx, device_get_nameunit(self), MTX_NETWORK_LOCK,
+	    MTX_DEF);
 
-	sc->amrr.amrr_min_success_threshold =  1;
-	sc->amrr.amrr_max_success_threshold = 10;
+	TIMEOUT_TASK_INIT(taskqueue_thread, &sc->scan_to, 0, otus_next_scan, sc);
+	TIMEOUT_TASK_INIT(taskqueue_thread, &sc->calib_to, 0, otus_calibrate_to, sc);
+	TASK_INIT(&sc->tx_task, 0, otus_tx_task, sc);
+	mbufq_init(&sc->sc_snd, ifqmaxlen);
 
-	if (usbd_set_config_no(sc->sc_udev, 1, 0) != 0) {
-		printf("%s: could not set configuration no\n",
-		    sc->sc_dev.dv_xname);
-		return;
-	}
 
-	/* Get the first interface handle. */
-	error = usbd_device2interface_handle(sc->sc_udev, 0, &sc->sc_iface);
-	if (error != 0) {
-		printf("%s: could not get interface handle\n",
-		    sc->sc_dev.dv_xname);
-		return;
+	iface_index = 0;
+	error = usbd_transfer_setup(uaa->device, &iface_index, sc->sc_xfer,
+	    otus_config, OTUS_N_XFER, sc, &sc->sc_mtx);
+	if (error) {
+		device_printf(sc->sc_dev,
+		    "could not allocate USB transfers, err=%s\n",
+		    usbd_errstr(error));
+		goto fail_usb;
 	}
 
 	if ((error = otus_open_pipes(sc)) != 0) {
-		printf("%s: could not open pipes\n", sc->sc_dev.dv_xname);
-		return;
+		device_printf(sc->sc_dev, "%s: could not open pipes\n",
+		    __func__);
+		goto fail;
 	}
 
-	if (rootvp == NULL)
-		mountroothook_establish(otus_attachhook, sc);
-	else
-		otus_attachhook(sc);
+	/* XXX check return status; fail out if appropriate */
+	otus_attachhook(sc);
+
+	return (0);
+
+fail:
+	otus_close_pipes(sc);
+fail_usb:
+	mtx_destroy(&sc->sc_mtx);
+	return (ENXIO);
 }
 
-int
-otus_detach(struct device *self, int flags)
+static int
+otus_detach(device_t self)
 {
-	struct otus_softc *sc = (struct otus_softc *)self;
-	struct ifnet *ifp = &sc->sc_ic.ic_if;
-	int s;
+	struct otus_softc *sc = device_get_softc(self);
+	struct ieee80211com *ic = &sc->sc_ic;
 
-	s = splusb();
+	OTUS_LOCK(sc);
+	otus_stop(sc);
+	OTUS_UNLOCK(sc);
 
-	if (timeout_initialized(&sc->scan_to))
-		timeout_del(&sc->scan_to);
-	if (timeout_initialized(&sc->calib_to))
-		timeout_del(&sc->calib_to);
+	usbd_transfer_unsetup(sc->sc_xfer, OTUS_N_XFER);
 
+	taskqueue_drain_timeout(taskqueue_thread, &sc->scan_to);
+	taskqueue_drain_timeout(taskqueue_thread, &sc->calib_to);
+	taskqueue_drain(taskqueue_thread, &sc->tx_task);
+
+#if 0
 	/* Wait for all queued asynchronous commands to complete. */
 	usb_rem_wait_task(sc->sc_udev, &sc->sc_task);
 
 	usbd_ref_wait(sc->sc_udev);
+#endif
 
-	if (ifp->if_softc != NULL) {
-		ifp->if_flags &= ~(IFF_RUNNING | IFF_OACTIVE);
-		ieee80211_ifdetach(ifp);
-		if_detach(ifp);
-	}
-
+	ieee80211_ifdetach(ic);
 	otus_close_pipes(sc);
-
-	splx(s);
-
+	mtx_destroy(&sc->sc_mtx);
 	return 0;
 }
 
-void
+static void
 otus_attachhook(void *xsc)
 {
 	struct otus_softc *sc = xsc;
@@ -526,59 +529,7 @@ otus_load_firmware(struct otus_softc *sc, const char *name, uint32_t addr)
 int
 otus_open_pipes(struct otus_softc *sc)
 {
-	usb_endpoint_descriptor_t *ed;
 	int i, isize, error;
-
-	error = usbd_open_pipe(sc->sc_iface, AR_EPT_BULK_RX_NO, 0,
-	    &sc->data_rx_pipe);
-	if (error != 0) {
-		printf("%s: could not open Rx bulk pipe\n",
-		    sc->sc_dev.dv_xname);
-		goto fail;
-	}
-
-	ed = usbd_get_endpoint_descriptor(sc->sc_iface, AR_EPT_INTR_RX_NO);
-	if (ed == NULL) {
-		printf("%s: could not retrieve Rx intr pipe descriptor\n",
-		    sc->sc_dev.dv_xname);
-		goto fail;
-	}
-	isize = UGETW(ed->wMaxPacketSize);
-	if (isize == 0) {
-		printf("%s: invalid Rx intr pipe descriptor\n",
-		    sc->sc_dev.dv_xname);
-		goto fail;
-	}
-	sc->ibuf = malloc(isize, M_USBDEV, M_NOWAIT);
-	if (sc->ibuf == NULL) {
-		printf("%s: could not allocate Rx intr buffer\n",
-		    sc->sc_dev.dv_xname);
-		goto fail;
-	}
-	error = usbd_open_pipe_intr(sc->sc_iface, AR_EPT_INTR_RX_NO,
-	    USBD_SHORT_XFER_OK, &sc->cmd_rx_pipe, sc, sc->ibuf, isize,
-	    otus_intr, USBD_DEFAULT_INTERVAL);
-	if (error != 0) {
-		printf("%s: could not open Rx intr pipe\n",
-		    sc->sc_dev.dv_xname);
-		goto fail;
-	}
-
-	error = usbd_open_pipe(sc->sc_iface, AR_EPT_BULK_TX_NO, 0,
-	    &sc->data_tx_pipe);
-	if (error != 0) {
-		printf("%s: could not open Tx bulk pipe\n",
-		    sc->sc_dev.dv_xname);
-		goto fail;
-	}
-
-	error = usbd_open_pipe(sc->sc_iface, AR_EPT_INTR_TX_NO, 0,
-	    &sc->cmd_tx_pipe);
-	if (error != 0) {
-		printf("%s: could not open Tx intr pipe\n",
-		    sc->sc_dev.dv_xname);
-		goto fail;
-	}
 
 	if (otus_alloc_tx_cmd(sc) != 0) {
 		printf("%s: could not allocate command xfer\n",
@@ -598,6 +549,7 @@ otus_open_pipes(struct otus_softc *sc)
 		goto fail;
 	}
 
+#if 0
 	for (i = 0; i < OTUS_RX_DATA_LIST_COUNT; i++) {
 		struct otus_rx_data *data = &sc->rx_data[i];
 
@@ -611,9 +563,10 @@ otus_open_pipes(struct otus_softc *sc)
 			goto fail;
 		}
 	}
+#endif
 	return 0;
 
- fail:	otus_close_pipes(sc);
+fail:	otus_close_pipes(sc);
 	return error;
 }
 
@@ -624,14 +577,8 @@ otus_close_pipes(struct otus_softc *sc)
 	otus_free_tx_data_list(sc);
 	otus_free_rx_data_list(sc);
 
-	if (sc->data_rx_pipe != NULL)
-		usbd_close_pipe(sc->data_rx_pipe);
-	if (sc->cmd_rx_pipe != NULL) {
-		usbd_abort_pipe(sc->cmd_rx_pipe);
-		usbd_close_pipe(sc->cmd_rx_pipe);
-	}
-	if (sc->ibuf != NULL)
-		free(sc->ibuf, M_USBDEV, 0);
+	usbd_transfer_unsetup(sc->sc_xfer, OTUS_N_XFER);
+
 	if (sc->data_tx_pipe != NULL)
 		usbd_close_pipe(sc->data_tx_pipe);
 	if (sc->cmd_tx_pipe != NULL)
@@ -760,7 +707,7 @@ otus_free_rx_data_list(struct otus_softc *sc)
 }
 
 void
-otus_next_scan(void *arg)
+otus_next_scan(void *arg, int pending)
 {
 	struct otus_softc *sc = arg;
 
@@ -2215,7 +2162,7 @@ otus_delete_key_cb(struct otus_softc *sc, void *arg)
 #endif
 
 void
-otus_calibrate_to(void *arg)
+otus_calibrate_to(void *arg, int pending)
 {
 	struct otus_softc *sc = arg;
 	struct ieee80211com *ic = &sc->sc_ic;
