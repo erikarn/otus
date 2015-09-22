@@ -64,45 +64,44 @@
 
 #include "if_otusreg.h"
 
-
-#ifdef OTUS_DEBUG
-#define DPRINTF(x)	do { if (otus_debug) printf x; } while (0)
-#define DPRINTFN(n, x)	do { if (otus_debug >= (n)) printf x; } while (0)
-int otus_debug = 1;
-#else
-#define DPRINTF(x)
-#define DPRINTFN(n, x)
+#ifdef USB_DEBUG
+int otus_debug = 0xffffffff;
+static SYSCTL_NODE(_hw_usb, OID_AUTO, otus, CTLFLAG_RW, 0, "USB otus");
+SYSCTL_INT(_hw_usb_otus, OID_AUTO, debug, CTLFLAG_RWTUN, &otus_debug, 0,
+    "Debug level");
 #endif
 
-static const struct usb_devno otus_devs[] = {
-	{ USB_VENDOR_ACCTON,		USB_PRODUCT_ACCTON_WN7512 },
-	{ USB_VENDOR_ATHEROS2,		USB_PRODUCT_ATHEROS2_3CRUSBN275 },
-	{ USB_VENDOR_ATHEROS2,		USB_PRODUCT_ATHEROS2_TG121N },
-	{ USB_VENDOR_ATHEROS2,		USB_PRODUCT_ATHEROS2_AR9170 },
-	{ USB_VENDOR_ATHEROS2,		USB_PRODUCT_ATHEROS2_WN612 },
-	{ USB_VENDOR_ATHEROS2,		USB_PRODUCT_ATHEROS2_WN821NV2 },
-	{ USB_VENDOR_AVM,		USB_PRODUCT_AVM_FRITZWLAN },
-	{ USB_VENDOR_CACE,		USB_PRODUCT_CACE_AIRPCAPNX },
-	{ USB_VENDOR_DLINK2,		USB_PRODUCT_DLINK2_DWA130D1 },
-	{ USB_VENDOR_DLINK2,		USB_PRODUCT_DLINK2_DWA160A1 },
-	{ USB_VENDOR_DLINK2,		USB_PRODUCT_DLINK2_DWA160A2 },
-	{ USB_VENDOR_IODATA,		USB_PRODUCT_IODATA_WNGDNUS2 },
-	{ USB_VENDOR_NEC,		USB_PRODUCT_NEC_WL300NUG },
-	{ USB_VENDOR_NETGEAR,		USB_PRODUCT_NETGEAR_WN111V2 },
-	{ USB_VENDOR_NETGEAR,		USB_PRODUCT_NETGEAR_WNA1000 },
-	{ USB_VENDOR_NETGEAR,		USB_PRODUCT_NETGEAR_WNDA3100 },
-	{ USB_VENDOR_PLANEX2,		USB_PRODUCT_PLANEX2_GW_US300 },
-	{ USB_VENDOR_WISTRONNEWEB,	USB_PRODUCT_WISTRONNEWEB_O8494 },
-	{ USB_VENDOR_WISTRONNEWEB,	USB_PRODUCT_WISTRONNEWEB_WNC0600 },
-	{ USB_VENDOR_ZCOM,		USB_PRODUCT_ZCOM_UB81 },
-	{ USB_VENDOR_ZCOM,		USB_PRODUCT_ZCOM_UB82 },
-	{ USB_VENDOR_ZYDAS,		USB_PRODUCT_ZYDAS_ZD1221 },
-	{ USB_VENDOR_ZYXEL,		USB_PRODUCT_ZYXEL_NWD271N }
+#define	OTUS_DEV(v, p) { USB_VPI(v, p, 0) }
+static const STRUCT_USB_HOST_ID otus_devs[] = {
+	OTUS_DEV(USB_VENDOR_ACCTON,		USB_PRODUCT_ACCTON_WN7512),
+	OTUS_DEV(USB_VENDOR_ATHEROS2,		USB_PRODUCT_ATHEROS2_3CRUSBN275),
+	OTUS_DEV(USB_VENDOR_ATHEROS2,		USB_PRODUCT_ATHEROS2_TG121N),
+	OTUS_DEV(USB_VENDOR_ATHEROS2,		USB_PRODUCT_ATHEROS2_AR9170),
+	OTUS_DEV(USB_VENDOR_ATHEROS2,		USB_PRODUCT_ATHEROS2_WN612),
+	OTUS_DEV(USB_VENDOR_ATHEROS2,		USB_PRODUCT_ATHEROS2_WN821NV2),
+	OTUS_DEV(USB_VENDOR_AVM,		USB_PRODUCT_AVM_FRITZWLAN),
+	OTUS_DEV(USB_VENDOR_CACE,		USB_PRODUCT_CACE_AIRPCAPNX),
+	OTUS_DEV(USB_VENDOR_DLINK2,		USB_PRODUCT_DLINK2_DWA130D1),
+	OTUS_DEV(USB_VENDOR_DLINK2,		USB_PRODUCT_DLINK2_DWA160A1),
+	OTUS_DEV(USB_VENDOR_DLINK2,		USB_PRODUCT_DLINK2_DWA160A2),
+	OTUS_DEV(USB_VENDOR_IODATA,		USB_PRODUCT_IODATA_WNGDNUS2),
+	OTUS_DEV(USB_VENDOR_NEC,		USB_PRODUCT_NEC_WL300NUG),
+	OTUS_DEV(USB_VENDOR_NETGEAR,		USB_PRODUCT_NETGEAR_WN111V2),
+	OTUS_DEV(USB_VENDOR_NETGEAR,		USB_PRODUCT_NETGEAR_WNA1000),
+	OTUS_DEV(USB_VENDOR_NETGEAR,		USB_PRODUCT_NETGEAR_WNDA3100),
+	OTUS_DEV(USB_VENDOR_PLANEX2,		USB_PRODUCT_PLANEX2_GW_US300),
+	OTUS_DEV(USB_VENDOR_WISTRONNEWEB,	USB_PRODUCT_WISTRONNEWEB_O8494),
+	OTUS_DEV(USB_VENDOR_WISTRONNEWEB,	USB_PRODUCT_WISTRONNEWEB_WNC0600),
+	OTUS_DEV(USB_VENDOR_ZCOM,		USB_PRODUCT_ZCOM_UB81),
+	OTUS_DEV(USB_VENDOR_ZCOM,		USB_PRODUCT_ZCOM_UB82),
+	OTUS_DEV(USB_VENDOR_ZYDAS,		USB_PRODUCT_ZYDAS_ZD1221),
+	OTUS_DEV(USB_VENDOR_ZYXEL,		USB_PRODUCT_ZYXEL_NWD271N),
 };
 
-int		otus_match(struct device *, void *, void *);
-void		otus_attach(struct device *, struct device *, void *);
-int		otus_detach(struct device *, int);
+static device_probe_t otus_match;
+static device_attach_t otus_attach;
+static device_detach_t otus_detach;
+
 void		otus_attachhook(void *);
 void		otus_get_chanlist(struct otus_softc *);
 int		otus_load_firmware(struct otus_softc *, const char *,
@@ -172,24 +171,81 @@ void		otus_led_newstate_type3(struct otus_softc *);
 int		otus_init(struct ifnet *);
 void		otus_stop(struct ifnet *);
 
-struct cfdriver otus_cd = {
-	NULL, "otus", DV_IFNET
+static device_method_t otus_methods[] = {
+	DEVMETHOD(device_probe,         otus_match),
+	DEVMETHOD(device_attach,        otus_attach),
+	DEVMETHOD(device_detach,        otus_detach),
+
+	DEVMETHOD_END
 };
 
-const struct cfattach otus_ca = {
-	sizeof (struct otus_softc), otus_match, otus_attach, otus_detach
+static driver_t otus_driver = {
+        .name = "otus",
+        .methods = otus_methods,
+        .size = sizeof(struct otus_softc)
+};
+
+static devclass_t otus_devclass;
+
+DRIVER_MODULE(otus, uhub, otus_driver, otus_devclass, NULL, 0);
+MODULE_DEPEND(otus, wlan, 1, 1, 1);
+MODULE_DEPEND(otus, usb, 1, 1, 1);
+MODULE_DEPEND(otus, firmware, 1, 1, 1);
+MODULE_VERSION(otus, 1);
+
+static usb_callback_t	otus_bulk_tx_callback;
+static usb_callback_t	otus_bulk_rx_callback;
+static usb_callback_t	otus_bulk_irq_callback;
+static usb_callback_t	otus_bulk_cmd_callback;
+
+static const struct usb_config otus_config[OTUS_N_XFER] = {
+	[OTUS_BULK_TX] = {
+	.type = UE_BULK,
+	.endpoint = UE_ADDR_ANY,
+	.direction = UE_DIR_OUT,
+	.bufsize = 0x200,
+	.flags = {.pipe_bof = 1,.force_short_xfer = 1,},
+	.callback = otus_bulk_tx_callback,
+	.timeout = 5000,        /* ms */
+	},
+	[OTUS_BULK_RX] = {
+	.type = UE_BULK,
+	.endpoint = UE_ADDR_ANY,
+	.direction = UE_DIR_IN,
+	.bufsize = MCLBYTES,
+	.flags = { .ext_buffer = 1, .pipe_bof = 1,.short_xfer_ok = 1,},
+	.callback = otus_bulk_rx_callback,
+	},
+	[OTUS_BULK_IRQ] = {
+	.type = UE_INTERRUPT,
+	.endpoint = UE_ADDR_ANY,
+	.direction = UE_DIR_IN,
+	.bufsize = OTUS_MAX_CTRLSZ,
+	.flags = {.pipe_bof = 1,.short_xfer_ok = 1,},
+	.callback = otus_bulk_irq_callback,
+	},
+	[OTUS_BULK_CMD] = {
+	.type = UE_INTERRUPT,
+	.endpoint = UE_ADDR_ANY,
+	.direction = UE_DIR_OUT,
+	.bufsize = OTUS_MAX_CTRLSZ,
+	.flags = {.pipe_bof = 1,.force_short_xfer = 1,},
+	.callback = otus_bulk_cmd_callback,
+	.timeout = 5000,        /* ms */
+	},
 };
 
 int
-otus_match(struct device *parent, void *match, void *aux)
+otus_match(device_t self)
 {
-	struct usb_attach_arg *uaa = aux;
+	struct usb_attach_arg *uaa = device_get_ivars(self);
 
-	if (uaa->iface != NULL)
-		return UMATCH_NONE;
+	if (uaa->usb_mode != USB_MODE_HOST ||
+	    uaa->info.bIfaceIndex != 0 ||
+	    uaa->info.bConfigIndex != 0)
+	return (ENXIO);
 
-	return (usb_lookup(otus_devs, uaa->vendor, uaa->product) != NULL) ?
-	    UMATCH_VENDOR_PRODUCT : UMATCH_NONE;
+	return (usbd_lookup_id_by_uaa(otus_devs, sizeof(otus_devs), uaa));
 }
 
 void
