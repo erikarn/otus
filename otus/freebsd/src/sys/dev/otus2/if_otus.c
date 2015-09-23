@@ -378,6 +378,26 @@ otus_vap_delete(struct ieee80211vap *vap)
 	free(uvp, M_80211_VAP);
 }
 
+static void
+otus_parent(struct ieee80211com *ic)
+{
+	struct otus_softc *sc = ic->ic_softc;
+	int startall = 0;
+
+	OTUS_LOCK(sc);
+	if (ic->ic_nrunning > 0) {
+		if (!sc->sc_running) {
+			otus_init(sc);
+			startall = 1;
+		}
+	} else if (sc->sc_running)
+		otus_stop(sc);
+	OTUS_UNLOCK(sc);
+
+	if (startall)
+		ieee80211_start_all(ic);
+}
+
 static int
 otus_attachhook(struct otus_softc *sc)
 {
@@ -387,6 +407,7 @@ otus_attachhook(struct otus_softc *sc)
 	int error;
 	uint8_t bands;
 
+	/* Not locked */
 	error = otus_load_firmware(sc, "otus-init", AR_FW_INIT_ADDR);
 	if (error != 0) {
 		device_printf(sc->sc_dev, "%s: could not load %s firmware\n",
@@ -394,14 +415,18 @@ otus_attachhook(struct otus_softc *sc)
 		return (ENXIO);
 	}
 
+	/* XXX not locked? */
 	otus_delay_ms(sc, 1000);
 
+	/* Not locked */
 	error = otus_load_firmware(sc, "otus-main", AR_FW_MAIN_ADDR);
 	if (error != 0) {
 		device_printf(sc->sc_dev, "%s: could not load %s firmware\n",
 		    __func__, "main");
 		return (ENXIO);
 	}
+
+	OTUS_LOCK(sc);
 
 	/* Tell device that firmware transfer is complete. */
 	req.bmRequestType = UT_WRITE_VENDOR_DEVICE;
@@ -411,6 +436,7 @@ otus_attachhook(struct otus_softc *sc)
 	USETW(req.wLength, 0);
 	if (usbd_do_request_flags(sc->sc_udev, &sc->sc_mtx, &req, NULL,
 	    0, NULL, 250) != 0) {
+		OTUS_UNLOCK(sc);
 		device_printf(sc->sc_dev,
 		    "%s: firmware initialization failed\n",
 		    __func__);
@@ -419,7 +445,6 @@ otus_attachhook(struct otus_softc *sc)
 
 	/* Send an ECHO command to check that everything is settled. */
 	in = 0xbadc0ffe;
-	OTUS_LOCK(sc);
 	if (otus_cmd(sc, AR_CMD_ECHO, &in, sizeof in, &out) != 0) {
 		OTUS_UNLOCK(sc);
 		device_printf(sc->sc_dev,
@@ -530,18 +555,12 @@ otus_attachhook(struct otus_softc *sc)
 	ic->ic_delete_key = otus_delete_key;
 #endif
 
-#if NBPFILTER > 0
-	bpfattach(&sc->sc_drvbpf, ifp, DLT_IEEE802_11_RADIO,
-	    sizeof (struct ieee80211_frame) + IEEE80211_RADIOTAP_HDRLEN);
+	ieee80211_radiotap_attach(ic, &sc->sc_txtap.wt_ihdr,
+	    sizeof(sc->sc_txtap), OTUS_TX_RADIOTAP_PRESENT,
+	    &sc->sc_rxtap.wr_ihdr, sizeof(sc->sc_rxtap),
+	    OTUS_RX_RADIOTAP_PRESENT);
 
-	sc->sc_rxtap_len = sizeof sc->sc_rxtapu;
-	sc->sc_rxtap.wr_ihdr.it_len = htole16(sc->sc_rxtap_len);
-	sc->sc_rxtap.wr_ihdr.it_present = htole32(OTUS_RX_RADIOTAP_PRESENT);
-
-	sc->sc_txtap_len = sizeof sc->sc_txtapu;
-	sc->sc_txtap.wt_ihdr.it_len = htole16(sc->sc_txtap_len);
-	sc->sc_txtap.wt_ihdr.it_present = htole32(OTUS_TX_RADIOTAP_PRESENT);
-#endif
+	return (0);
 }
 
 void
@@ -553,8 +572,8 @@ otus_get_chanlist(struct otus_softc *sc)
 	int i;
 
 	/* XXX regulatory domain. */
-	domain = letoh16(sc->eeprom.baseEepHeader.regDmn[0]);
-	DPRINTF(("regdomain=0x%04x\n", domain));
+	domain = le16toh(sc->eeprom.baseEepHeader.regDmn[0]);
+	DPRINTF("regdomain=0x%04x\n", domain);
 
 	if (sc->eeprom.baseEepHeader.opCapFlags & AR5416_OPFLAGS_11G) {
 		for (i = 0; i < 14; i++) {
@@ -580,28 +599,33 @@ int
 otus_load_firmware(struct otus_softc *sc, const char *name, uint32_t addr)
 {
 	usb_device_request_t req;
-	size_t size;
-	u_char *fw, *ptr;
-	int mlen, error;
+	const char *ptr;
+	const struct firmware *fw;
+	int mlen, error, size;
 
 	/* Read firmware image from the filesystem. */
-	if ((error = loadfirmware(name, &fw, &size)) != 0) {
-		printf("%s: failed loadfirmware of file %s (error %d)\n",
-		    sc->sc_dev.dv_xname, name, error);
+	if ((fw = firmware_get(name)) == NULL) {
+		device_printf(sc->sc_dev,
+		    "%s: failed loadfirmware of file %s\n", __func__, name);
 		return error;
 	}
 	req.bmRequestType = UT_WRITE_VENDOR_DEVICE;
 	req.bRequest = AR_FW_DOWNLOAD;
 	USETW(req.wIndex, 0);
 
-	ptr = fw;
+	OTUS_LOCK(sc);
+
+	/* XXX const */
+	ptr = (const void *) fw->data;
+	size = fw->datasize;
 	addr >>= 8;
 	while (size > 0) {
 		mlen = MIN(size, 4096);
 
 		USETW(req.wValue, addr);
 		USETW(req.wLength, mlen);
-		if (usbd_do_request(sc->sc_udev, &req, ptr) != 0) {
+		if (usbd_do_request_flags(sc->sc_udev, &sc->sc_mtx,
+		    &req, ptr, 0, NULL, 250) != 0) {
 			error = EIO;
 			break;
 		}
@@ -609,33 +633,42 @@ otus_load_firmware(struct otus_softc *sc, const char *name, uint32_t addr)
 		ptr  += mlen;
 		size -= mlen;
 	}
-	free(fw, M_DEVBUF, 0);
+
+	OTUS_UNLOCK(sc);
+
+	firmware_put(fw, FIRMWARE_UNLOAD);
 	return error;
 }
 
 int
 otus_open_pipes(struct otus_softc *sc)
 {
-	int i, isize, error;
+#if 0
+	int isize, error;
+	int i;
+#endif
+	int error;
 
-	if (otus_alloc_tx_cmd(sc) != 0) {
-		printf("%s: could not allocate command xfer\n",
-		    sc->sc_dev.dv_xname);
+	if ((error = otus_alloc_tx_cmd(sc)) != 0) {
+		device_printf(sc->sc_dev,
+		    "%s: could not allocate command xfer\n",
+		    __func__);
 		goto fail;
 	}
 
-	if (otus_alloc_tx_data_list(sc) != 0) {
-		printf("%s: could not allocate Tx xfers\n",
-		    sc->sc_dev.dv_xname);
+	if ((error = otus_alloc_tx_data_list(sc)) != 0) {
+		device_printf(sc->sc_dev, "%s: could not allocate Tx xfers\n",
+		    __func__);
 		goto fail;
 	}
 
-	if (otus_alloc_rx_data_list(sc) != 0) {
-		printf("%s: could not allocate Rx xfers\n",
-		    sc->sc_dev.dv_xname);
+	if ((error = otus_alloc_rx_data_list(sc)) != 0) {
+		device_printf(sc->sc_dev, "%s: could not allocate Rx xfers\n",
+		    __func__);
 		goto fail;
 	}
 
+	/* XXX TODO - setup RX transfers? */
 #if 0
 	for (i = 0; i < OTUS_RX_DATA_LIST_COUNT; i++) {
 		struct otus_rx_data *data = &sc->rx_data[i];
@@ -1047,8 +1080,8 @@ otus_newassoc(struct ieee80211com *ic, struct ieee80211_node *ni, int isnew)
 	uint8_t rate;
 	int ridx, i;
 
-	DPRINTF(("new assoc isnew=%d addr=%s\n",
-	    isnew, ether_sprintf(ni->ni_macaddr)));
+	DPRINTF("new assoc isnew=%d addr=%s\n",
+	    isnew, ether_sprintf(ni->ni_macaddr));
 
 	ieee80211_amrr_node_init(&sc->amrr, &on->amn);
 	/* Start at lowest available bit-rate, AMRR will raise. */
