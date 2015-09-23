@@ -1016,6 +1016,7 @@ otus_cmd(struct otus_softc *sc, uint8_t code, const void *idata, int ilen,
 #if 0
 	int s, xferlen, error;
 #endif
+	int xferlen;
 	uint8_t which = OTUS_BULK_CMD;
 
 	OTUS_LOCK_ASSERT(sc);
@@ -1327,7 +1328,7 @@ otus_sub_rxeof(struct otus_softc *sc, uint8_t *buf, int len, struct mbufq *rxq)
 	mlen = len - AR_PLCP_HDR_LEN - sizeof (*tail);
 	/* Make sure there's room for an 802.11 header + FCS. */
 	if (__predict_false(mlen < IEEE80211_MIN_LEN)) {
-		ifp->if_ierrors++;
+		counter_u64_add(ic->ic_ierrors, 1);
 		return;
 	}
 	mlen -= IEEE80211_CRC_LEN;	/* strip 802.11 FCS */
@@ -1418,7 +1419,7 @@ otus_rxeof(struct usb_xfer *xfer, struct otus_data *data, struct mbufq *rxq)
 	uint16_t hlen;
 	int len;
 
-	usbd_get_xfer_status(xfer, &len, NULL, NULL, NULL);
+	usbd_xfer_status(xfer, &len, NULL, NULL, NULL);
 
 	while (len >= sizeof (*head)) {
 		head = (struct ar_rx_head *)buf;
@@ -2505,6 +2506,7 @@ void
 otus_led_newstate_type1(struct otus_softc *sc)
 {
 	/* TBD */
+	device_printf(sc->sc_dev, "%s: TODO\n", __func__);
 }
 
 /* NETGEAR, dual-LED. */
@@ -2512,12 +2514,15 @@ void
 otus_led_newstate_type2(struct otus_softc *sc)
 {
 	/* TBD */
+	device_printf(sc->sc_dev, "%s: TODO\n", __func__);
 }
 
 /* NETGEAR, single-LED/3 colors (blue, red, purple.) */
 void
 otus_led_newstate_type3(struct otus_softc *sc)
 {
+	device_printf(sc->sc_dev, "%s: TODO\n", __func__);
+#if 0
 	struct ieee80211com *ic = &sc->sc_ic;
 	uint32_t state = sc->led_state;
 
@@ -2542,6 +2547,7 @@ otus_led_newstate_type3(struct otus_softc *sc)
 		if (otus_write_barrier(sc) == 0)
 			sc->led_state = state;
 	}
+#endif
 }
 
 int
@@ -2614,19 +2620,23 @@ otus_init(struct otus_softc *sc)
 void
 otus_stop(struct otus_softc *sc)
 {
-	struct ieee80211com *ic = &sc->sc_ic;
+#if 0
 	int s;
+#endif
+
+	OTUS_LOCK_ASSERT(sc);
 
 	sc->sc_tx_timer = 0;
-	ifp->if_timer = 0;
-	ifp->if_flags &= ~(IFF_RUNNING | IFF_OACTIVE);
 
-	timeout_del(&sc->scan_to);
-	timeout_del(&sc->calib_to);
+	taskqueue_drain_timeout(taskqueue_thread, &sc->scan_to);
+	taskqueue_drain_timeout(taskqueue_thread, &sc->calib_to);
 
 	/* Stop Rx. */
 	otus_write(sc, 0x1c3d30, 0);
 	(void)otus_write_barrier(sc);
+
+	/* XXX flush mbuf queue */
+	device_printf(sc->sc_dev, "%s: TODO: flush tx/rx queues\n", __func__);
 
 	sc->tx_queued = 0;
 }
