@@ -409,6 +409,14 @@ otus_transmit(struct ieee80211com *ic, struct mbuf *m)
 	return (ENXIO);
 }
 
+static void
+otus_tx_task(void *arg, int pending)
+{
+	struct otus_softc *sc = arg;
+
+	device_printf(sc->sc_dev, "%s: TODO\n", __func__);
+}
+
 static int
 otus_raw_xmit(struct ieee80211_node *ni, struct mbuf *m,
     const struct ieee80211_bpf_params *params)
@@ -676,7 +684,7 @@ int
 otus_load_firmware(struct otus_softc *sc, const char *name, uint32_t addr)
 {
 	usb_device_request_t req;
-	const char *ptr;
+	char *ptr;
 	const struct firmware *fw;
 	int mlen, error, size;
 
@@ -695,7 +703,7 @@ otus_load_firmware(struct otus_softc *sc, const char *name, uint32_t addr)
 	OTUS_LOCK(sc);
 
 	/* XXX const */
-	ptr = (const void *) fw->data;
+	ptr = __DECONST(char *, fw->data);
 	size = fw->datasize;
 	addr >>= 8;
 	while (size > 0) {
@@ -1283,12 +1291,15 @@ void
 otus_sub_rxeof(struct otus_softc *sc, uint8_t *buf, int len, struct mbufq *rxq)
 {
 	struct ieee80211com *ic = &sc->sc_ic;
+#if 0
 	struct ieee80211_node *ni;
+#endif
 	struct ar_rx_tail *tail;
 	struct ieee80211_frame *wh;
 	struct mbuf *m;
 	uint8_t *plcp;
-	int s, mlen, align;
+//	int s;
+	int mlen;
 
 	if (__predict_false(len < AR_PLCP_HDR_LEN)) {
 		DPRINTF("sub-xfer too short %d\n", len);
@@ -1318,8 +1329,10 @@ otus_sub_rxeof(struct otus_softc *sc, uint8_t *buf, int len, struct mbufq *rxq)
 			DPRINTF("bad FCS\n");
 		} else if (tail->error & AR_RX_ERROR_MMIC) {
 			/* Report Michael MIC failures to net80211. */
-			ic->ic_stats.is_rx_locmicfail++;
-			ieee80211_michael_mic_failure(ic, 0);
+#if 0
+			ieee80211_notify_michael_failure(ni->ni_vap, wh, keyidx);
+#endif
+			device_printf(sc->sc_dev, "%s: MIC failure\n", __func__);
 		}
 		counter_u64_add(ic->ic_ierrors, 1);
 		return;
@@ -1334,8 +1347,6 @@ otus_sub_rxeof(struct otus_softc *sc, uint8_t *buf, int len, struct mbufq *rxq)
 	mlen -= IEEE80211_CRC_LEN;	/* strip 802.11 FCS */
 
 	wh = (struct ieee80211_frame *)(plcp + AR_PLCP_HDR_LEN);
-	/* Provide a 32-bit aligned protocol header to the stack. */
-	align = (ieee80211_has_qos(wh) ^ ieee80211_has_addr4(wh)) ? 2 : 0;
 
 	m = m_get2(mlen, M_NOWAIT, MT_DATA, M_PKTHDR);
 	if (m == NULL) {
@@ -1344,7 +1355,6 @@ otus_sub_rxeof(struct otus_softc *sc, uint8_t *buf, int len, struct mbufq *rxq)
 	}
 
 	/* Finalize mbuf. */
-	m->m_data += align;
 	memcpy(mtod(m, uint8_t *), wh, mlen);
 	m->m_pkthdr.len = m->m_len = mlen;
 
@@ -1474,7 +1484,7 @@ tr_setup:
 		 */
 		data = STAILQ_FIRST(&sc->sc_rx_inactive);
 		if (data == NULL) {
-			KASSERT(m == NULL, ("mbuf isn't NULL"));
+			//KASSERT(m == NULL, ("mbuf isn't NULL"));
 			return;
 		}
 		STAILQ_REMOVE_HEAD(&sc->sc_rx_inactive, next);
@@ -1562,9 +1572,9 @@ otus_txcmdeof(struct usb_xfer *xfer, struct otus_data *data)
 }
 
 static void
-otus_bulk_tx_callback_sub(struct usb_xfer *xfer, usb_error_t error,
-    uint8_t which)
+otus_bulk_tx_callback(struct usb_xfer *xfer, usb_error_t error)
 {
+	uint8_t which = OTUS_BULK_TX;
 	struct otus_softc *sc = usbd_xfer_softc(xfer);
 	struct ieee80211com *ic = &sc->sc_ic;
 	struct otus_data *data;
@@ -1840,6 +1850,7 @@ int
 otus_set_multi(struct otus_softc *sc)
 {
 	device_printf(sc->sc_dev, "%s: XXX TODO\n", __func__);
+	return (0);
 #if 0
 	struct arpcom *ac = &sc->sc_ic.ic_ac;
 	struct ifnet *ifp = &ac->ac_if;
