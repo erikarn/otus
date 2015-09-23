@@ -868,52 +868,31 @@ struct otus_tx_radiotap_header {
 
 struct otus_softc;
 
+#if 0
 struct otus_tx_cmd {
-	struct usbd_xfer	*xfer;
 	uint8_t			*buf;
 	void			*odata;
 	uint16_t		token;
 	uint8_t			done;
+	int			ready;
 };
+#endif
 
-struct otus_rx_data {
+/* TX, RX, cmd buffers */
+struct otus_data {
 	struct otus_softc	*sc;
-	struct usbd_xfer	*xfer;
 	uint8_t			*buf;
-};
-
-struct otus_tx_data {
-	struct otus_softc	*sc;
-	struct usbd_xfer	*xfer;
-	uint8_t			*buf;
-};
-
-struct otus_host_cmd {
-	void	(*cb)(struct otus_softc *, void *);
-	uint8_t	data[256];
-};
-
-#define OTUS_HOST_CMD_RING_COUNT	32
-struct otus_host_cmd_ring {
-	struct otus_host_cmd	cmd[OTUS_HOST_CMD_RING_COUNT];
-	int			cur;
-	int			next;
-	int			queued;
+	uint16_t		buflen;
+	struct mbuf		*m;
+	void			*odata;
+	int			done;
+	struct ieee80211_node	*ni;
+	STAILQ_ENTRY(otus_data)	next;
 };
 
 struct otus_node {
 	struct ieee80211_node		ni;
 	uint8_t				ridx[IEEE80211_RATE_MAXSIZE];
-};
-
-struct otus_cmd_newstate {
-	enum ieee80211_state	state;
-	int			arg;
-};
-
-struct otus_cmd_key {
-	struct ieee80211_key	key;
-	uint16_t		associd;
 };
 
 #define OTUS_CONFIG_INDEX               0
@@ -956,6 +935,9 @@ struct otus_vap {
 /* intr/cmd endpoint dump says 0x40 */
 #define	OTUS_MAX_CTRLSZ		64
 
+#define	OTUS_RX_LIST_COUNT	128
+#define	OTUS_TX_LIST_COUNT	32
+
 struct otus_softc {
 	struct ieee80211com		sc_ic;
 	struct mbufq			sc_snd;
@@ -990,6 +972,7 @@ struct otus_softc {
 	int				tx_cur;
 	int				tx_queued;
 	uint32_t			led_state;
+	int				token;
 
 	const uint32_t			*phy_vals;
 
@@ -998,12 +981,15 @@ struct otus_softc {
 		uint32_t	val;
 	} __packed			write_buf[AR_MAX_WRITE_IDX + 1];
 
-	struct otus_host_cmd_ring	cmdq;
-	struct otus_tx_cmd		tx_cmd;
-	struct otus_tx_data		tx_data[OTUS_TX_DATA_LIST_COUNT];
-	struct otus_rx_data		rx_data[OTUS_RX_DATA_LIST_COUNT];
-
+	struct otus_data		sc_rx[OTUS_RX_LIST_COUNT];
+	struct otus_data		sc_tx[OTUS_TX_LIST_COUNT];
 	struct usb_xfer			*sc_xfer[OTUS_N_XFER];
+
+	STAILQ_HEAD(, otus_data)	sc_rx_active;
+	STAILQ_HEAD(, otus_data)	sc_rx_inactive;
+	STAILQ_HEAD(, otus_data)	sc_tx_active[OTUS_N_XFER];
+	STAILQ_HEAD(, otus_data)	sc_tx_inactive;
+	STAILQ_HEAD(, otus_data)	sc_tx_pending[OTUS_N_XFER];
 
 	union {
 		struct otus_rx_radiotap_header th;

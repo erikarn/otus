@@ -108,12 +108,19 @@ int		otus_load_firmware(struct otus_softc *, const char *,
 		    uint32_t);
 int		otus_open_pipes(struct otus_softc *);
 void		otus_close_pipes(struct otus_softc *);
-int		otus_alloc_tx_cmd(struct otus_softc *);
-void		otus_free_tx_cmd(struct otus_softc *);
-int		otus_alloc_tx_data_list(struct otus_softc *);
-void		otus_free_tx_data_list(struct otus_softc *);
-int		otus_alloc_rx_data_list(struct otus_softc *);
-void		otus_free_rx_data_list(struct otus_softc *);
+
+static int	otus_alloc_tx_cmd(struct otus_softc *);
+static void	otus_free_tx_cmd(struct otus_softc *);
+
+static int	otus_alloc_rx_list(struct otus_softc *);
+static void	otus_free_rx_list(struct otus_softc *);
+static int	otus_alloc_tx_list(struct otus_softc *);
+static void	otus_free_tx_list(struct otus_softc *);
+static void	otus_free_list(struct otus_softc *, struct otus_data [], int);
+static struct otus_data *_otus_getbuf(struct otus_softc *);
+static struct otus_data *otus_getbuf(struct otus_softc *);
+static void	otus_freebuf(struct otus_softc *, struct otus_data *);
+
 void		otus_next_scan(void *, int);
 static void	otus_tx_task(void *, int pending);
 void		otus_do_async(struct otus_softc *,
@@ -132,7 +139,7 @@ void		otus_newassoc(struct ieee80211com *, struct ieee80211_node *,
 void		otus_cmd_rxeof(struct otus_softc *, uint8_t *, int);
 void		otus_sub_rxeof(struct otus_softc *, uint8_t *, int);
 int		otus_tx(struct otus_softc *, struct mbuf *,
-		    struct ieee80211_node *);
+		    struct ieee80211_node *, struct otus_data *);
 void		otus_start(struct ifnet *);
 void		otus_watchdog(struct ifnet *);
 int		otus_ioctl(struct ifnet *, u_long, caddr_t);
@@ -729,13 +736,13 @@ otus_open_pipes(struct otus_softc *sc)
 		goto fail;
 	}
 
-	if ((error = otus_alloc_tx_data_list(sc)) != 0) {
+	if ((error = otus_alloc_tx_list(sc)) != 0) {
 		device_printf(sc->sc_dev, "%s: could not allocate Tx xfers\n",
 		    __func__);
 		goto fail;
 	}
 
-	if ((error = otus_alloc_rx_data_list(sc)) != 0) {
+	if ((error = otus_alloc_rx_list(sc)) != 0) {
 		device_printf(sc->sc_dev, "%s: could not allocate Rx xfers\n",
 		    __func__);
 		goto fail;
@@ -767,136 +774,171 @@ void
 otus_close_pipes(struct otus_softc *sc)
 {
 	otus_free_tx_cmd(sc);
-	otus_free_tx_data_list(sc);
-	otus_free_rx_data_list(sc);
+	otus_free_tx_list(sc);
+	otus_free_rx_list(sc);
 
 	usbd_transfer_unsetup(sc->sc_xfer, OTUS_N_XFER);
 }
 
-int
+static int
 otus_alloc_tx_cmd(struct otus_softc *sc)
 {
-	struct otus_tx_cmd *cmd = &sc->tx_cmd;
 
-	cmd->xfer = usbd_alloc_xfer(sc->sc_udev);
-	if (cmd->xfer == NULL) {
-		device_printf(sc->sc_dev, "%s: could not allocate xfer\n",
-		    __func__);
-		return ENOMEM;
-	}
-	cmd->buf = usbd_alloc_buffer(cmd->xfer, OTUS_MAX_TXCMDSZ);
-	if (cmd->buf == NULL) {
-		device_printf(sc->sc_dev,
-		    "%s: could not allocate xfer buffer\n",
-		    __func__);
-		usbd_free_xfer(cmd->xfer);
-		return ENOMEM;
-	}
-	return 0;
+	return (0);
 }
 
-void
+static void
 otus_free_tx_cmd(struct otus_softc *sc)
 {
-	/* Make sure no transfers are pending. */
-	usbd_abort_pipe(sc->cmd_tx_pipe);
-
-	if (sc->tx_cmd.xfer != NULL)
-		usbd_free_xfer(sc->tx_cmd.xfer);
 }
 
-int
-otus_alloc_tx_data_list(struct otus_softc *sc)
+static int
+otus_alloc_list(struct otus_softc *sc, struct otus_data data[],
+    int ndata, int maxsz)
 {
-	struct otus_tx_data *data;
 	int i, error;
 
-	for (i = 0; i < OTUS_TX_DATA_LIST_COUNT; i++) {
-		data = &sc->tx_data[i];
-
-		data->sc = sc;  /* Backpointer for callbacks. */
-
-		data->xfer = usbd_alloc_xfer(sc->sc_udev);
-		if (data->xfer == NULL) {
+	for (i = 0; i < ndata; i++) {
+		struct otus_data *dp = &data[i];
+		dp->sc = sc;
+		dp->m = NULL;
+		dp->buf = malloc(maxsz, M_USBDEV, M_NOWAIT);
+		if (dp->buf == NULL) {
 			device_printf(sc->sc_dev,
-			    "%s: could not allocate xfer\n",
-			    __func__);
+			    "could not allocate buffer\n");
 			error = ENOMEM;
 			goto fail;
 		}
-		data->buf = usbd_alloc_buffer(data->xfer, OTUS_TXBUFSZ);
-		if (data->buf == NULL) {
-			device_printf(sc->sc_dev,
-			    "%s: could not allocate xfer buffer\n",
-			    __func__);
-			error = ENOMEM;
-			goto fail;
-		}
+		dp->ni = NULL;
 	}
-	return 0;
 
-fail:	otus_free_tx_data_list(sc);
-	return error;
+	return (0);
+fail:
+	otus_free_list(sc, data, ndata);
+	return (error);
 }
 
-void
-otus_free_tx_data_list(struct otus_softc *sc)
+static int
+otus_alloc_rx_list(struct otus_softc *sc)
+{
+        int error, i;
+
+	error = otus_alloc_list(sc, sc->sc_rx, OTUS_RX_LIST_COUNT,
+	    OTUS_RXBUFSZ);
+	if (error != 0)
+		return (error);
+
+	STAILQ_INIT(&sc->sc_rx_active);
+	STAILQ_INIT(&sc->sc_rx_inactive);
+
+	for (i = 0; i < OTUS_RX_LIST_COUNT; i++)
+		STAILQ_INSERT_HEAD(&sc->sc_rx_inactive, &sc->sc_rx[i], next);
+
+	return (0);
+}
+
+static int
+otus_alloc_tx_list(struct otus_softc *sc)
+{
+	int error, i;
+
+	error = otus_alloc_list(sc, sc->sc_tx, OTUS_TX_LIST_COUNT,
+	    OTUS_TXBUFSZ);
+	if (error != 0)
+		return (error);
+
+	STAILQ_INIT(&sc->sc_tx_inactive);
+
+	for (i = 0; i != OTUS_N_XFER; i++) {
+		STAILQ_INIT(&sc->sc_tx_active[i]);
+		STAILQ_INIT(&sc->sc_tx_pending[i]);
+	}
+
+	for (i = 0; i < OTUS_TX_LIST_COUNT; i++) {
+		STAILQ_INSERT_HEAD(&sc->sc_tx_inactive, &sc->sc_tx[i], next);
+	}
+
+	return (0);
+}
+
+static void
+otus_free_tx_list(struct otus_softc *sc)
 {
 	int i;
 
-	/* Make sure no transfers are pending. */
-	usbd_abort_pipe(sc->data_tx_pipe);
+	/* prevent further allocations from TX list(s) */
+	STAILQ_INIT(&sc->sc_tx_inactive);
 
-	for (i = 0; i < OTUS_TX_DATA_LIST_COUNT; i++)
-		if (sc->tx_data[i].xfer != NULL)
-			usbd_free_xfer(sc->tx_data[i].xfer);
-}
-
-int
-otus_alloc_rx_data_list(struct otus_softc *sc)
-{
-	struct otus_rx_data *data;
-	int i, error;
-
-	for (i = 0; i < OTUS_RX_DATA_LIST_COUNT; i++) {
-		data = &sc->rx_data[i];
-
-		data->sc = sc;	/* Backpointer for callbacks. */
-
-		data->xfer = usbd_alloc_xfer(sc->sc_udev);
-		if (data->xfer == NULL) {
-			device_printf(sc->sc_dev,
-			    "%s: could not allocate xfer\n",
-			    __func__);
-			error = ENOMEM;
-			goto fail;
-		}
-		data->buf = usbd_alloc_buffer(data->xfer, OTUS_RXBUFSZ);
-		if (data->buf == NULL) {
-			device_printf(sc->sc_dev,
-			    "%s: could not allocate xfer buffer\n",
-			    __func__);
-			error = ENOMEM;
-			goto fail;
-		}
+	for (i = 0; i != OTUS_N_XFER; i++) {
+		STAILQ_INIT(&sc->sc_tx_active[i]);
+		STAILQ_INIT(&sc->sc_tx_pending[i]);
 	}
-	return 0;
 
-fail:	otus_free_rx_data_list(sc);
-	return error;
+	otus_free_list(sc, sc->sc_tx, OTUS_TX_LIST_COUNT);
 }
 
-void
-otus_free_rx_data_list(struct otus_softc *sc)
+static void
+otus_free_rx_list(struct otus_softc *sc)
+{
+	/* prevent further allocations from RX list(s) */
+	STAILQ_INIT(&sc->sc_rx_inactive);
+	STAILQ_INIT(&sc->sc_rx_active);
+
+	otus_free_list(sc, sc->sc_rx, OTUS_RX_LIST_COUNT);
+}
+
+static void
+otus_free_list(struct otus_softc *sc, struct otus_data data[], int ndata)
 {
 	int i;
 
-	/* Make sure no transfers are pending. */
-	usbd_abort_pipe(sc->data_rx_pipe);
+	for (i = 0; i < ndata; i++) {
+		struct otus_data *dp = &data[i];
 
-	for (i = 0; i < OTUS_RX_DATA_LIST_COUNT; i++)
-		if (sc->rx_data[i].xfer != NULL)
-			usbd_free_xfer(sc->rx_data[i].xfer);
+		if (dp->buf != NULL) {
+			free(dp->buf, M_USBDEV);
+			dp->buf = NULL;
+		}
+		if (dp->ni != NULL) {
+			ieee80211_free_node(dp->ni);
+			dp->ni = NULL;
+		}
+	}
+}
+
+static struct otus_data *
+_otus_getbuf(struct otus_softc *sc)
+{
+	struct otus_data *bf;
+
+	bf = STAILQ_FIRST(&sc->sc_tx_inactive);
+	if (bf != NULL)
+		STAILQ_REMOVE_HEAD(&sc->sc_tx_inactive, next);
+	else
+		bf = NULL;
+	return (bf);
+}
+
+static struct otus_data *
+otus_getbuf(struct otus_softc *sc)
+{
+	struct otus_data *bf;
+
+	OTUS_LOCK_ASSERT(sc);
+
+	bf = _otus_getbuf(sc);
+	if (bf == NULL) {
+		DPRINTF("%s: no buffers\n", __func__);
+	}
+	return (bf);
+}
+
+static void
+otus_freebuf(struct otus_softc *sc, struct otus_data *bf)
+{
+
+	OTUS_LOCK_ASSERT(sc);
+	STAILQ_INSERT_TAIL(&sc->sc_tx_inactive, bf, next);
 }
 
 void
@@ -969,19 +1011,30 @@ int
 otus_cmd(struct otus_softc *sc, uint8_t code, const void *idata, int ilen,
     void *odata)
 {
-	struct otus_tx_cmd *cmd = &sc->tx_cmd;
+	struct otus_data *cmd;
 	struct ar_cmd_hdr *hdr;
 	int s, xferlen, error;
+	uint8_t which = OTUS_BULK_CMD;
 
 	OTUS_LOCK_ASSERT(sc);
 
 	/* Always bulk-out a multiple of 4 bytes. */
 	xferlen = (sizeof (*hdr) + ilen + 3) & ~3;
 
+	/*
+	 * XXX TODO: have a separate pool for commands; maybe block a while.
+	 */
+	cmd = otus_getbuf(sc);
+	if (cmd == NULL) {
+		device_printf(sc->sc_dev, "%s: failed to get buf\n",
+		    __func__);
+		return (EIO);
+	}
+
 	hdr = (struct ar_cmd_hdr *)cmd->buf;
 	hdr->code  = code;
 	hdr->len   = ilen;
-	hdr->token = ++cmd->token;	/* Don't care about endianness. */
+	hdr->token = ++sc->token;	/* Don't care about endianness. */
 	memcpy((uint8_t *)&hdr[1], idata, ilen);
 
 	device_printf(sc->sc_dev,
@@ -991,16 +1044,12 @@ otus_cmd(struct otus_softc *sc, uint8_t code, const void *idata, int ilen,
 	cmd->odata = odata;
 	cmd->done = 0;
 
-	usbd_setup_xfer(cmd->xfer, sc->cmd_tx_pipe, cmd, cmd->buf, xferlen,
-	    USBD_FORCE_SHORT_XFER | USBD_NO_COPY | USBD_SYNCHRONOUS,
-	    OTUS_CMD_TIMEOUT, NULL);
-	error = usbd_transfer(cmd->xfer);
-	if (error != 0) {
-		device_printf(sc->sc_dev,
-		    "%s: could not send command 0x%x (error=%s)\n",
-		    __func__, code, usbd_errstr(error));
-		return EIO;
-	}
+	/* There's only one command to queue to this endpoint */
+	usbd_transfer_start(sc->sc_xfer[which]);
+
+#if 0
+	/* Wait for response if required */
+	error = 0;
 	if (!cmd->done)
 		error = msleep(cmd, &sc->sc_mtx, PCATCH, "otuscmd", hz);
 	cmd->odata = NULL;	/* In case answer is received too late. */
@@ -1010,6 +1059,18 @@ otus_cmd(struct otus_softc *sc, uint8_t code, const void *idata, int ilen,
 		    __func__, code);
 	}
 	return error;
+#endif
+	/*
+	 * XXX for now, there's no command wait bits.
+	 * Since it's USB it's a bit fiddly - for blocking commands
+	 * we'd /not/ free them in the bulk cmd transfer handler;
+	 * instead they would be queued to a separate wait queue
+	 * that the RX code would run, do the wakeup and hand
+	 * back to here to get the results and free things.
+	 */
+	if (odata)
+		device_printf(sc->sc_dev, "%s: odata; no way to wait for command completion\n", __func__);
+	return (0);
 }
 
 void
@@ -1064,7 +1125,7 @@ otus_media_change(struct ifnet *ifp)
 	}
 
 	if ((ifp->if_flags & (IFF_UP | IFF_RUNNING)) == (IFF_UP | IFF_RUNNING))
-		error = otus_init(ifp);
+		error = otus_init(sc);
 
 	return error;
 }
@@ -1113,58 +1174,43 @@ otus_newassoc(struct ieee80211com *ic, struct ieee80211_node *ni, int isnew)
 			if (otus_rates[ridx].rate == rate)
 				break;
 		on->ridx[i] = ridx;
-		DPRINTF(("rate=0x%02x ridx=%d\n",
-		    rs->rs_rates[i], on->ridx[i]));
+		DPRINTF("rate=0x%02x ridx=%d\n",
+		    rs->rs_rates[i], on->ridx[i]);
 	}
-}
-
-/* ARGSUSED */
-void
-otus_intr(struct usbd_xfer *xfer, void *priv, usbd_status status)
-{
-#if 0
-	struct otus_softc *sc = priv;
-	int len;
-
-	/*
-	 * The Rx intr pipe is unused with current firmware.  Notifications
-	 * and replies to commands are sent through the Rx bulk pipe instead
-	 * (with a magic PLCP header.)
-	 */
-	if (__predict_false(status != USBD_NORMAL_COMPLETION)) {
-		DPRINTF(("intr status=%d\n", status));
-		if (status == USBD_STALLED)
-			usbd_clear_endpoint_stall_async(sc->cmd_rx_pipe);
-		return;
-	}
-	usbd_get_xfer_status(xfer, NULL, NULL, &len, NULL);
-
-	otus_cmd_rxeof(sc, sc->ibuf, len);
-#endif
 }
 
 void
 otus_cmd_rxeof(struct otus_softc *sc, uint8_t *buf, int len)
 {
+#if 0
 	struct ieee80211com *ic = &sc->sc_ic;
 	struct otus_tx_cmd *cmd;
+#endif
 	struct ar_cmd_hdr *hdr;
-	int s;
+
+	OTUS_LOCK_ASSERT(sc);
 
 	if (__predict_false(len < sizeof (*hdr))) {
-		DPRINTF(("cmd too small %d\n", len));
+		DPRINTF("cmd too small %d\n", len);
 		return;
 	}
 	hdr = (struct ar_cmd_hdr *)buf;
 	if (__predict_false(sizeof (*hdr) + hdr->len > len ||
 	    sizeof (*hdr) + hdr->len > 64)) {
-		DPRINTF(("cmd too large %d\n", hdr->len));
+		DPRINTF("cmd too large %d\n", hdr->len);
 		return;
 	}
 
+	/*
+	 * XXX TODO: has to reach into the cmd queue "waiting for
+	 * an RX response" list, grab the head entry and check
+	 */
 	if ((hdr->code & 0xc0) != 0xc0) {
-		DPRINTFN(2, ("received reply code=0x%02x len=%d token=%d\n",
-		    hdr->code, hdr->len, hdr->token));
+		device_printf(sc->sc_dev,
+		    "%s: received reply code=0x%02x len=%d token=%d\n",
+		    __func__,
+		    hdr->code, hdr->len, hdr->token);
+#if 0
 		cmd = &sc->tx_cmd;
 		if (__predict_false(hdr->token != cmd->token))
 			return;
@@ -1173,24 +1219,30 @@ otus_cmd_rxeof(struct otus_softc *sc, uint8_t *buf, int len)
 			memcpy(cmd->odata, &hdr[1], hdr->len);
 		cmd->done = 1;
 		wakeup(cmd);
+#endif
 		return;
 	}
 
 	/* Received unsolicited notification. */
-	DPRINTF(("received notification code=0x%02x len=%d\n",
-	    hdr->code, hdr->len));
+	device_printf(sc->sc_dev,
+	    "%s: received notification code=0x%02x len=%d\n",
+	    __func__,
+	    hdr->code, hdr->len);
 	switch (hdr->code & 0x3f) {
 	case AR_EVT_BEACON:
 		break;
 	case AR_EVT_TX_COMP:
 	{
 		struct ar_evt_tx_comp *tx = (struct ar_evt_tx_comp *)&hdr[1];
+#if 0
 		struct ieee80211_node *ni;
 		struct otus_node *on;
+#endif
 
-		DPRINTF(("tx completed %s status=%d phy=0x%x\n",
-		    ether_sprintf(tx->macaddr), letoh16(tx->status),
-		    letoh32(tx->phy)));
+		DPRINTF("tx completed %s status=%d phy=0x%x\n",
+		    ether_sprintf(tx->macaddr), le16toh(tx->status),
+		    le32toh(tx->phy));
+#if 0
 		s = splnet();
 #ifdef notyet
 #ifndef IEEE80211_STA_ONLY
@@ -1210,6 +1262,7 @@ otus_cmd_rxeof(struct otus_softc *sc, uint8_t *buf, int len)
 		if (__predict_true(tx->status != 0))
 			on->amn.amn_retrycnt++;
 		splx(s);
+#endif
 		break;
 	}
 	case AR_EVT_TBTT:
@@ -1231,7 +1284,7 @@ otus_sub_rxeof(struct otus_softc *sc, uint8_t *buf, int len)
 	int s, mlen, align;
 
 	if (__predict_false(len < AR_PLCP_HDR_LEN)) {
-		DPRINTF(("sub-xfer too short %d\n", len));
+		DPRINTF("sub-xfer too short %d\n", len);
 		return;
 	}
 	plcp = buf;
@@ -1245,7 +1298,7 @@ otus_sub_rxeof(struct otus_softc *sc, uint8_t *buf, int len)
 
 	/* Received MPDU. */
 	if (__predict_false(len < AR_PLCP_HDR_LEN + sizeof (*tail))) {
-		DPRINTF(("MPDU too short %d\n", len));
+		DPRINTF("MPDU too short %d\n", len);
 		ifp->if_ierrors++;
 		return;
 	}
@@ -1253,9 +1306,9 @@ otus_sub_rxeof(struct otus_softc *sc, uint8_t *buf, int len)
 
 	/* Discard error frames. */
 	if (__predict_false(tail->error != 0)) {
-		DPRINTF(("error frame 0x%02x\n", tail->error));
+		DPRINTF("error frame 0x%02x\n", tail->error);
 		if (tail->error & AR_RX_ERROR_FCS) {
-			DPRINTFN(3, ("bad FCS\n"));
+			DPRINTF("bad FCS\n");
 		} else if (tail->error & AR_RX_ERROR_MMIC) {
 			/* Report Michael MIC failures to net80211. */
 			ic->ic_stats.is_rx_locmicfail++;
@@ -1295,7 +1348,7 @@ otus_sub_rxeof(struct otus_softc *sc, uint8_t *buf, int len)
 	memcpy(mtod(m, caddr_t), wh, mlen);
 	m->m_pkthdr.len = m->m_len = mlen;
 
-#if NBPFILTER > 0
+#if 0
 	if (__predict_false(sc->sc_drvbpf != NULL)) {
 		struct otus_rx_radiotap_header *tap = &sc->sc_rxtap;
 		struct mbuf mb;
@@ -1339,7 +1392,12 @@ otus_sub_rxeof(struct otus_softc *sc, uint8_t *buf, int len)
 	}
 #endif
 
-	s = splnet();
+	printf("%s: TODO: actually return mbuf! (%p)\n",
+	    __func__);
+	m_freem(m);
+
+#if 0
+	OTUS_UNLOCK(sc);
 	ni = ieee80211_find_rxnode(ic, wh);
 	rxi.rxi_flags = 0;
 	rxi.rxi_rssi = tail->rssi;
@@ -1348,38 +1406,30 @@ otus_sub_rxeof(struct otus_softc *sc, uint8_t *buf, int len)
 
 	/* Node is no longer needed. */
 	ieee80211_release_node(ic, ni);
-	splx(s);
+	OTUS_LOCK(sc);
+#endif
 }
 
-void
-otus_rxeof(struct usbd_xfer *xfer, void *priv, usbd_status status)
+static void
+otus_rxeof(struct usb_xfer *xfer, struct rsu_data *data)
 {
-	struct otus_rx_data *data = priv;
 	struct otus_softc *sc = data->sc;
 	caddr_t buf = data->buf;
 	struct ar_rx_head *head;
 	uint16_t hlen;
 	int len;
 
-	if (__predict_false(status != USBD_NORMAL_COMPLETION)) {
-		DPRINTF(("RX status=%d\n", status));
-		if (status == USBD_STALLED)
-			usbd_clear_endpoint_stall_async(sc->data_rx_pipe);
-		if (status != USBD_CANCELLED)
-			goto resubmit;
-		return;
-	}
-	usbd_get_xfer_status(xfer, NULL, NULL, &len, NULL);
+	usbd_get_xfer_status(xfer, &len, NULL, NULL, NULL);
 
 	while (len >= sizeof (*head)) {
 		head = (struct ar_rx_head *)buf;
 		if (__predict_false(head->tag != htole16(AR_RX_HEAD_TAG))) {
-			DPRINTF(("tag not valid 0x%x\n", letoh16(head->tag)));
+			DPRINTF("tag not valid 0x%x\n", le16toh(head->tag));
 			break;
 		}
-		hlen = letoh16(head->len);
+		hlen = le16toh(head->len);
 		if (__predict_false(sizeof (*head) + hlen > len)) {
-			DPRINTF(("xfer too short %d/%d\n", len, hlen));
+			DPRINTF("xfer too short %d/%d\n", len, hlen);
 			break;
 		}
 		/* Process sub-xfer. */
@@ -1390,45 +1440,272 @@ otus_rxeof(struct usbd_xfer *xfer, void *priv, usbd_status status)
 		buf += hlen;
 		len -= hlen;
 	}
-
- resubmit:
-	usbd_setup_xfer(xfer, sc->data_rx_pipe, data, data->buf, OTUS_RXBUFSZ,
-	    USBD_SHORT_XFER_OK, USBD_NO_TIMEOUT, otus_rxeof);
-	(void)usbd_transfer(data->xfer);
 }
 
-void
-otus_txeof(struct usbd_xfer *xfer, void *priv, usbd_status status)
+static void
+otus_bulk_rx_callback(struct usb_xfer *xfer, usb_error_t error)
 {
-	struct otus_tx_data *data = priv;
-	struct otus_softc *sc = data->sc;
+	struct otus_softc *sc = usbd_xfer_softc(xfer);
 	struct ieee80211com *ic = &sc->sc_ic;
-	struct ifnet *ifp = &ic->ic_if;
-	int s;
+	struct ieee80211_frame *wh;
+	struct ieee80211_node *ni;
+	struct mbuf *m = NULL, *next;
+	struct otus_data *data;
 
-	s = splnet();
-	sc->tx_queued--;
-	if (__predict_false(status != USBD_NORMAL_COMPLETION)) {
-		DPRINTF(("TX status=%d\n", status));
-		if (status == USBD_STALLED)
-			usbd_clear_endpoint_stall_async(sc->data_tx_pipe);
-		ifp->if_oerrors++;
-		splx(s);
-		return;
+	OTUS_ASSERT_LOCKED(sc);
+
+	switch (USB_GET_STATE(xfer)) {
+	case USB_ST_TRANSFERRED:
+		data = STAILQ_FIRST(&sc->sc_rx_active);
+		if (data == NULL)
+			goto tr_setup;
+		STAILQ_REMOVE_HEAD(&sc->sc_rx_active, next);
+		m = otus_rxeof(xfer, data);
+		STAILQ_INSERT_TAIL(&sc->sc_rx_inactive, data, next);
+		/* FALLTHROUGH */
+	case USB_ST_SETUP:
+tr_setup:
+		data = STAILQ_FIRST(&sc->sc_rx_inactive);
+		if (data == NULL) {
+			KASSERT(m == NULL, ("mbuf isn't NULL"));
+			return;
+		}
+		STAILQ_REMOVE_HEAD(&sc->sc_rx_inactive, next);
+		STAILQ_INSERT_TAIL(&sc->sc_rx_active, data, next);
+		usbd_xfer_set_frame_data(xfer, 0, data->buf,
+		    usbd_xfer_max_len(xfer));
+		usbd_transfer_submit(xfer);
+		/*
+		 * To avoid LOR we should unlock our private mutex here to call
+		 * ieee80211_input() because here is at the end of a USB
+		 * callback and safe to unlock.
+		 */
+		OTUS_UNLOCK(sc);
+		while (m != NULL) {
+			next = m->m_next;
+			m->m_next = NULL;
+			wh = mtod(m, struct ieee80211_frame *);
+			ni = ieee80211_find_rxnode(ic,
+			    (struct ieee80211_frame_min *)wh);
+			if (ni != NULL) {
+				if (ni->ni_flags & IEEE80211_NODE_HT)
+					m->m_flags |= M_AMPDU;
+				(void)ieee80211_input(ni, m, rssi, 0);
+				ieee80211_free_node(ni);
+			} else
+				(void)ieee80211_input_all(ic, m, rssi, 0);
+			m = next;
+		}
+		OTUS_LOCK(sc);
+		break;
+	default:
+		/* needs it to the inactive queue due to a error. */
+		data = STAILQ_FIRST(&sc->sc_rx_active);
+		if (data != NULL) {
+			STAILQ_REMOVE_HEAD(&sc->sc_rx_active, next);
+			STAILQ_INSERT_TAIL(&sc->sc_rx_inactive, data, next);
+		}
+		if (error != USB_ERR_CANCELLED) {
+			usbd_xfer_set_stall(xfer);
+			counter_u64_add(ic->ic_ierrors, 1);
+			goto tr_setup;
+		}
+		break;
 	}
-	sc->sc_tx_timer = 0;
-	ifp->if_opackets++;
-	ifp->if_flags &= ~IFF_OACTIVE;
-	otus_start(ifp);
-	splx(s);
 }
 
+static void
+otus_txeof(struct usb_xfer *xfer, struct rsu_data *data)
+{
+
+	DPRINTF("%s: called; data=%p\n", __func__, data);
+
+	if (data->m) {
+		/* XXX status? */
+		/* XXX we get TX status via the RX path.. */
+		ieee80211_tx_complete(data->ni, data->m, 0);
+		data->m = NULL;
+		data->ni = NULL;
+	}
+}
+
+static void
+otus_txcmdeof(struct usb_xfer *xfer, struct rsu_data *data)
+{
+	struct otus_softc *sc = usbd_xfer_softc(xfer);
+
+	/* XXX for now; always free */
+	/*
+	 * XXX later on - if we require a response, don't free; put
+	 * into an RX pending queue and wait for the RX path to
+	 * read it and notify the waiter.
+	 *
+	 * Note: the sender may time out and leave stale events;
+	 * so the RX path needs to free back any buffers that
+	 * it finds whose sequence number doesn't match what is
+	 * being waited on.
+	 *
+	 * Note note: make sure we don't free buffers being
+	 * waited on from underneath the waiter.  Ugh.
+	 */
+	DPRINTF("%s: called; data=%p\n", __func__, data);
+	rsu_freebuf(sc, data);
+}
+
+static void
+otus_bulk_tx_callback_sub(struct usb_xfer *xfer, usb_error_t error,
+    uint8_t which)
+{
+	struct otus_softc *sc = usbd_xfer_softc(xfer);
+	struct ieee80211com *ic = &sc->sc_ic;
+	struct otus_data *data;
+
+	RSU_ASSERT_LOCKED(sc);
+
+	switch (USB_GET_STATE(xfer)) {
+	case USB_ST_TRANSFERRED:
+		data = STAILQ_FIRST(&sc->sc_tx_active[which]);
+		if (data == NULL)
+			goto tr_setup;
+		DPRINTF("%s: transfer done %p\n", __func__, data);
+		STAILQ_REMOVE_HEAD(&sc->sc_tx_active[which], next);
+		otus_txeof(xfer, data);
+		otus_freebuf(sc, data);
+		/* FALLTHROUGH */
+	case USB_ST_SETUP:
+tr_setup:
+		data = STAILQ_FIRST(&sc->sc_tx_pending[which]);
+		if (data == NULL) {
+			DPRINTF("%s: empty pending queue sc %p\n", __func__, sc);
+			return;
+		}
+		STAILQ_REMOVE_HEAD(&sc->sc_tx_pending[which], next);
+		STAILQ_INSERT_TAIL(&sc->sc_tx_active[which], data, next);
+		usbd_xfer_set_frame_data(xfer, 0, data->buf, data->buflen);
+		DPRINTF("%s: submitting transfer %p\n", __func__, data);
+		usbd_transfer_submit(xfer);
+		break;
+	default:
+		data = STAILQ_FIRST(&sc->sc_tx_active[which]);
+		if (data != NULL) {
+			STAILQ_REMOVE_HEAD(&sc->sc_tx_active[which], next);
+			rsu_txeof(xfer, data);
+			rsu_freebuf(sc, data);
+		}
+		counter_u64_add(ic->ic_oerrors, 1);
+
+		if (error != USB_ERR_CANCELLED) {
+			usbd_xfer_set_stall(xfer);
+			goto tr_setup;
+		}
+		break;
+	}
+}
+
+static void
+otus_bulk_cmd_callback(struct usb_xfer *xfer, usb_error_t error)
+{
+	struct otus_softc *sc = usbd_xfer_softc(xfer);
+	struct ieee80211com *ic = &sc->sc_ic;
+	struct otus_data *data;
+	uint8_t which = OTUS_BULK_CMD;
+
+	RSU_ASSERT_LOCKED(sc);
+
+	switch (USB_GET_STATE(xfer)) {
+	case USB_ST_TRANSFERRED:
+		data = STAILQ_FIRST(&sc->sc_tx_active[which]);
+		if (data == NULL)
+			goto tr_setup;
+		DPRINTF("%s: transfer done %p\n", __func__, data);
+		STAILQ_REMOVE_HEAD(&sc->sc_tx_active[which], next);
+		otus_txcmdeof(xfer, data);
+		/* FALLTHROUGH */
+	case USB_ST_SETUP:
+tr_setup:
+		data = STAILQ_FIRST(&sc->sc_tx_pending[which]);
+		if (data == NULL) {
+			DPRINTF("%s: empty pending queue sc %p\n", __func__, sc);
+			return;
+		}
+		STAILQ_REMOVE_HEAD(&sc->sc_tx_pending[which], next);
+		STAILQ_INSERT_TAIL(&sc->sc_tx_active[which], data, next);
+		usbd_xfer_set_frame_data(xfer, 0, data->buf, data->buflen);
+		DPRINTF("%s: submitting transfer %p\n", __func__, data);
+		usbd_transfer_submit(xfer);
+		break;
+	default:
+		data = STAILQ_FIRST(&sc->sc_tx_active[which]);
+		if (data != NULL) {
+			STAILQ_REMOVE_HEAD(&sc->sc_tx_active[which], next);
+			otus_txcmdeof(xfer, data);
+		}
+
+		if (error != USB_ERR_CANCELLED) {
+			usbd_xfer_set_stall(xfer);
+			goto tr_setup;
+		}
+		break;
+	}
+}
+
+/*
+ * This isn't used by carl9170; it however may be used by the
+ * initial bootloader.
+ */
+static void
+otus_bulk_irq_callback(struct usb_xfer *xfer, usb_error_t error)
+{
+	struct otus_softc *sc = usbd_xfer_softc(xfer);
+	int actlen;
+	int sumlen;
+
+	usbd_xfer_status(xfer, &actlen, &sumlen, NULL, NULL);
+	DPRINTF( "%s: called; state=%d\n", __func__, USB_GET_STATE(xfer));
+
+	switch (USB_GET_STATE(xfer)) {
+	case USB_ST_TRANSFERRED:
+		/*
+		 * Read usb frame data, if any.
+		 * "actlen" has the total length for all frames
+		 * transferred.
+		 */
+		DPRINTF(sc, OTUS_DEBUG_USB_XFER,
+		    "%s: comp; %d bytes\n",
+		    __func__,
+		    actlen);
+#if 0
+		pc = usbd_xfer_get_frame(xfer, 0);
+		otus_dump_usb_rx_page(sc, pc, actlen);
+#endif
+		/* XXX fallthrough */
+	case USB_ST_SETUP:
+		/*
+		 * Setup xfer frame lengths/count and data
+		 */
+		DPRINTF(sc, OTUS_DEBUG_USB_XFER,
+		    "%s: setup\n", __func__);
+		usbd_xfer_set_frame_len(xfer, 0, usbd_xfer_max_len(xfer));
+		usbd_transfer_submit(xfer);
+		break;
+
+	default: /* Error */
+		/*
+		 * Print error message and clear stall
+		 * for example.
+		 */
+		device_printf(sc->sc_dev, "%s: ERROR?\n", __func__);
+		break;
+	}
+}
+
+/* XXX TODO: needs to get a buffer from the appropriate queue */
 int
-otus_tx(struct otus_softc *sc, struct mbuf *m, struct ieee80211_node *ni)
+otus_tx(struct otus_softc *sc, struct mbuf *m, struct ieee80211_node *ni,
+    struct otus_data *data)
 {
 	struct ieee80211com *ic = &sc->sc_ic;
 	struct otus_node *on = (void *)ni;
-	struct otus_tx_data *data;
 	struct ieee80211_frame *wh;
 	struct ieee80211_key *k;
 	struct ar_tx_head *head;
@@ -1500,7 +1777,6 @@ otus_tx(struct otus_softc *sc, struct mbuf *m, struct ieee80211_node *ni)
 	if (!(macctl & AR_TX_MAC_NOACK))
 		((struct otus_node *)ni)->amn.amn_txcnt++;
 
-	data = &sc->tx_data[sc->tx_cur];
 	/* Fill Tx descriptor. */
 	head = (struct ar_tx_head *)data->buf;
 	head->len = htole16(m->m_pkthdr.len + IEEE80211_CRC_LEN);
@@ -1577,17 +1853,7 @@ otus_start(struct ifnet *ifp)
 		IFQ_DEQUEUE(&ifp->if_snd, m);
 		if (m == NULL)
 			break;
-#if NBPFILTER > 0
-		if (ifp->if_bpf != NULL)
-			bpf_mtap(ifp->if_bpf, m, BPF_DIRECTION_OUT);
-#endif
-		if ((m = ieee80211_encap(ifp, m, &ni)) == NULL)
-			continue;
-sendit:
-#if NBPFILTER > 0
-		if (ic->ic_rawbpf != NULL)
-			bpf_mtap(ic->ic_rawbpf, m, BPF_DIRECTION_OUT);
-#endif
+
 		if (otus_tx(sc, m, ni) != 0) {
 			ieee80211_release_node(ic, ni);
 			ifp->if_oerrors++;
@@ -1821,13 +2087,13 @@ otus_set_board_values(struct otus_softc *sc, struct ieee80211_channel *c)
 	/* Offset of chain 2. */
 	offset = 2 * 0x1000;
 
-	tmp = letoh32(eep->antCtrlCommon);
+	tmp = le32toh(eep->antCtrlCommon);
 	otus_write(sc, AR_PHY_SWITCH_COM, tmp);
 
-	tmp = letoh32(eep->antCtrlChain[0]);
+	tmp = le32toh(eep->antCtrlChain[0]);
 	otus_write(sc, AR_PHY_SWITCH_CHAIN_0, tmp);
 
-	tmp = letoh32(eep->antCtrlChain[1]);
+	tmp = le32toh(eep->antCtrlChain[1]);
 	otus_write(sc, AR_PHY_SWITCH_CHAIN_0 + offset, tmp);
 
 	if (1 /* sc->sc_sco == AR_SCO_SCN */) {
@@ -2017,7 +2283,7 @@ otus_set_chan(struct otus_softc *sc, struct ieee80211_channel *c, int assoc)
 	int error, chan, i;
 
 	chan = ieee80211_chan2ieee(ic, c);
-	DPRINTF(("setting channel %d (%dMHz)\n", chan, c->ic_freq));
+	DPRINTF("setting channel %d (%dMHz)\n", chan, c->ic_freq);
 
 	tmp = IEEE80211_IS_CHAN_2GHZ(c) ? 0x105 : 0x104;
 	otus_write(sc, AR_MAC_REG_DYNAMIC_SIFS_ACK, tmp);
@@ -2036,7 +2302,7 @@ otus_set_chan(struct otus_softc *sc, struct ieee80211_channel *c, int assoc)
 
 	/* Reprogram PHY and RF on channel band or bandwidth changes. */
 	if (sc->bb_reset || c->ic_flags != sc->sc_curchan->ic_flags) {
-		DPRINTF(("band switch\n"));
+		DPRINTF("band switch\n");
 
 		/* Cold/Warm reset BB/ADDA. */
 		otus_write(sc, 0x1d4004, sc->bb_reset ? 0x800 : 0x400);
@@ -2087,33 +2353,33 @@ otus_set_chan(struct otus_softc *sc, struct ieee80211_channel *c, int assoc)
 	otus_get_delta_slope(coeff, &exp, &man);
 	cmd.dsc_exp = htole32(exp);
 	cmd.dsc_man = htole32(man);
-	DPRINTF(("ds coeff=%u exp=%u man=%u\n", coeff, exp, man));
+	DPRINTF("ds coeff=%u exp=%u man=%u\n", coeff, exp, man);
 	/* For Short GI, coeff is 9/10 that of normal coeff. */
 	coeff = (9 * coeff) / 10;
 	otus_get_delta_slope(coeff, &exp, &man);
 	cmd.dsc_shgi_exp = htole32(exp);
 	cmd.dsc_shgi_man = htole32(man);
-	DPRINTF(("ds shgi coeff=%u exp=%u man=%u\n", coeff, exp, man));
+	DPRINTF("ds shgi coeff=%u exp=%u man=%u\n", coeff, exp, man);
 	/* Set wait time for AGC and noise calibration (100 or 200ms). */
 	cmd.check_loop_count = assoc ? htole32(2000) : htole32(1000);
-	DPRINTF(("%s\n", (code == AR_CMD_RF_INIT) ? "RF_INIT" : "FREQUENCY"));
+	DPRINTF("%s\n", (code == AR_CMD_RF_INIT) ? "RF_INIT" : "FREQUENCY");
 	error = otus_cmd(sc, code, &cmd, sizeof cmd, &rsp);
 	if (error != 0)
 		return error;
 	if ((rsp.status & htole32(AR_CAL_ERR_AGC | AR_CAL_ERR_NF_VAL)) != 0) {
-		DPRINTF(("status=0x%x\n", letoh32(rsp.status)));
+		DPRINTF("status=0x%x\n", le32toh(rsp.status));
 		/* Force cold reset on next channel. */
 		sc->bb_reset = 1;
 	}
 #ifdef OTUS_DEBUG
 	if (otus_debug) {
-		printf("calibration status=0x%x\n", letoh32(rsp.status));
+		printf("calibration status=0x%x\n", le32toh(rsp.status));
 		for (i = 0; i < 2; i++) {	/* 2 Rx chains */
 			/* Sign-extend 9-bit NF values. */
 			printf("noisefloor chain %d=%d\n", i,
-			    (((int32_t)letoh32(rsp.nf[i])) << 4) >> 23);
+			    (((int32_t)le32toh(rsp.nf[i])) << 4) >> 23);
 			printf("noisefloor ext chain %d=%d\n", i,
-			    ((int32_t)letoh32(rsp.nf_ext[i])) >> 23);
+			    ((int32_t)le32toh(rsp.nf_ext[i])) >> 23);
 		}
 	}
 #endif
@@ -2310,9 +2576,8 @@ otus_led_newstate_type3(struct otus_softc *sc)
 }
 
 int
-otus_init(struct ifnet *ifp)
+otus_init(struct otus_softc *sc)
 {
-	struct otus_softc *sc = ifp->if_softc;
 	struct ieee80211com *ic = &sc->sc_ic;
 	int error;
 
@@ -2352,8 +2617,8 @@ otus_init(struct ifnet *ifp)
 	(void)otus_write_barrier(sc);
 
 	sc->bb_reset = 1;	/* Force cold reset. */
-	ic->ic_bss->ni_chan = ic->ic_ibss_chan;
-	if ((error = otus_set_chan(sc, ic->ic_ibss_chan, 0)) != 0) {
+
+	if ((error = otus_set_chan(sc, ic->ic_curchan, 0)) != 0) {
 		printf("%s: could not set channel\n", sc->sc_dev.dv_xname);
 		return error;
 	}
@@ -2365,18 +2630,19 @@ otus_init(struct ifnet *ifp)
 	ifp->if_flags &= ~IFF_OACTIVE;
 	ifp->if_flags |= IFF_RUNNING;
 
+#if 0
 	if (ic->ic_opmode == IEEE80211_M_MONITOR)
 		ieee80211_new_state(ic, IEEE80211_S_RUN, -1);
 	else
 		ieee80211_new_state(ic, IEEE80211_S_SCAN, -1);
+#endif
 
 	return 0;
 }
 
 void
-otus_stop(struct ifnet *ifp)
+otus_stop(struct otus_softc *sc)
 {
-	struct otus_softc *sc = ifp->if_softc;
 	struct ieee80211com *ic = &sc->sc_ic;
 	int s;
 
@@ -2386,12 +2652,6 @@ otus_stop(struct ifnet *ifp)
 
 	timeout_del(&sc->scan_to);
 	timeout_del(&sc->calib_to);
-
-	s = splusb();
-	ieee80211_new_state(ic, IEEE80211_S_INIT, -1);
-	/* Wait for all queued asynchronous commands to complete. */
-	usb_wait_task(sc->sc_udev, &sc->sc_task);
-	splx(s);
 
 	/* Stop Rx. */
 	otus_write(sc, 0x1c3d30, 0);
