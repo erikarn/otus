@@ -102,7 +102,7 @@ static device_probe_t otus_match;
 static device_attach_t otus_attach;
 static device_detach_t otus_detach;
 
-static void		otus_attachhook(void *);
+static int	otus_attachhook(struct otus_softc *);
 void		otus_get_chanlist(struct otus_softc *);
 int		otus_load_firmware(struct otus_softc *, const char *,
 		    uint32_t);
@@ -266,7 +266,6 @@ otus_attach(device_t self)
 	TASK_INIT(&sc->tx_task, 0, otus_tx_task, sc);
 	mbufq_init(&sc->sc_snd, ifqmaxlen);
 
-
 	iface_index = 0;
 	error = usbd_transfer_setup(uaa->device, &iface_index, sc->sc_xfer,
 	    otus_config, OTUS_N_XFER, sc, &sc->sc_mtx);
@@ -284,7 +283,8 @@ otus_attach(device_t self)
 	}
 
 	/* XXX check return status; fail out if appropriate */
-	otus_attachhook(sc);
+	if (otus_attachhook(sc) != 0)
+		goto fail;
 
 	return (0);
 
@@ -325,29 +325,82 @@ otus_detach(device_t self)
 }
 
 static void
-otus_attachhook(void *xsc)
+otus_delay_ms(struct otus_softc *sc, int ms)
 {
-	struct otus_softc *sc = xsc;
+
+	DELAY(1000 * ms);
+}
+
+static struct ieee80211vap *
+otus_vap_create(struct ieee80211com *ic, const char name[IFNAMSIZ], int unit,
+    enum ieee80211_opmode opmode, int flags,
+    const uint8_t bssid[IEEE80211_ADDR_LEN],
+    const uint8_t mac[IEEE80211_ADDR_LEN])
+{
+	struct otus_vap *uvp;
+	struct ieee80211vap *vap;
+
+	if (!TAILQ_EMPTY(&ic->ic_vaps))         /* only one at a time */
+		return (NULL);
+
+	uvp =  malloc(sizeof(struct otus_vap), M_80211_VAP, M_WAITOK | M_ZERO);
+	vap = &uvp->vap;
+
+        if (ieee80211_vap_setup(ic, vap, name, unit, opmode,
+            flags, bssid) != 0) {
+                /* out of memory */
+                free(uvp, M_80211_VAP);
+                return (NULL);
+        }
+
+	/* override state transition machine */
+	uvp->newstate = vap->iv_newstate;
+	vap->iv_newstate = otus_newstate;
+
+	/* XXX TODO: double-check */
+	vap->iv_ampdu_density = IEEE80211_HTCAP_MPDUDENSITY_16;
+	vap->iv_ampdu_rxmax = IEEE80211_HTCAP_MAXRXAMPDU_32K;
+
+        /* complete setup */
+        ieee80211_vap_attach(vap, ieee80211_media_change,
+            ieee80211_media_status, mac);
+        ic->ic_opmode = opmode;
+
+	return (vap);
+}
+
+static void
+otus_vap_delete(struct ieee80211vap *vap)
+{
+	struct otus_vap *uvp = OTUS_VAP(vap);
+
+	ieee80211_vap_detach(vap);
+	free(uvp, M_80211_VAP);
+}
+
+static int
+otus_attachhook(struct otus_softc *sc)
+{
 	struct ieee80211com *ic = &sc->sc_ic;
-	struct ifnet *ifp = &ic->ic_if;
 	usb_device_request_t req;
 	uint32_t in, out;
 	int error;
+	uint8_t bands;
 
 	error = otus_load_firmware(sc, "otus-init", AR_FW_INIT_ADDR);
 	if (error != 0) {
-		printf("%s: could not load %s firmware\n",
-		    sc->sc_dev.dv_xname, "init");
-		return;
+		device_printf(sc->sc_dev, "%s: could not load %s firmware\n",
+		    __func__, "init");
+		return (ENXIO);
 	}
 
-	usbd_delay_ms(sc->sc_udev, 1000);
+	otus_delay_ms(sc, 1000);
 
 	error = otus_load_firmware(sc, "otus-main", AR_FW_MAIN_ADDR);
 	if (error != 0) {
-		printf("%s: could not load %s firmware\n",
-		    sc->sc_dev.dv_xname, "main");
-		return;
+		device_printf(sc->sc_dev, "%s: could not load %s firmware\n",
+		    __func__, "main");
+		return (ENXIO);
 	}
 
 	/* Tell device that firmware transfer is complete. */
@@ -356,54 +409,74 @@ otus_attachhook(void *xsc)
 	USETW(req.wValue, 0);
 	USETW(req.wIndex, 0);
 	USETW(req.wLength, 0);
-	if (usbd_do_request(sc->sc_udev, &req, NULL) != 0) {
-		printf("%s: firmware initialization failed\n",
-		    sc->sc_dev.dv_xname);
-		return;
+	if (usbd_do_request_flags(sc->sc_udev, &sc->sc_mtx, &req, NULL,
+	    0, NULL, 250) != 0) {
+		device_printf(sc->sc_dev,
+		    "%s: firmware initialization failed\n",
+		    __func__);
+		return (ENXIO);
 	}
 
 	/* Send an ECHO command to check that everything is settled. */
 	in = 0xbadc0ffe;
+	OTUS_LOCK(sc);
 	if (otus_cmd(sc, AR_CMD_ECHO, &in, sizeof in, &out) != 0) {
-		printf("%s: echo command failed\n", sc->sc_dev.dv_xname);
-		return;
+		OTUS_UNLOCK(sc);
+		device_printf(sc->sc_dev,
+		    "%s: echo command failed\n", __func__);
+		return (ENXIO);
 	}
 	if (in != out) {
-		printf("%s: echo reply mismatch: 0x%08x!=0x%08x\n",
-		    sc->sc_dev.dv_xname, in, out);
-		return;
+		OTUS_UNLOCK(sc);
+		device_printf(sc->sc_dev,
+		    "%s: echo reply mismatch: 0x%08x!=0x%08x\n",
+		    __func__, in, out);
+		return (ENXIO);
 	}
 
 	/* Read entire EEPROM. */
 	if (otus_read_eeprom(sc) != 0) {
-		printf("%s: could not read EEPROM\n", sc->sc_dev.dv_xname);
-		return;
+		OTUS_UNLOCK(sc);
+		device_printf(sc->sc_dev,
+		    "%s: could not read EEPROM\n",
+		    __func__);
+		return (ENXIO);
 	}
+
+	OTUS_UNLOCK(sc);
 
 	sc->txmask = sc->eeprom.baseEepHeader.txMask;
 	sc->rxmask = sc->eeprom.baseEepHeader.rxMask;
 	sc->capflags = sc->eeprom.baseEepHeader.opCapFlags;
-	IEEE80211_ADDR_COPY(ic->ic_myaddr, sc->eeprom.baseEepHeader.macAddr);
+	IEEE80211_ADDR_COPY(ic->ic_macaddr, sc->eeprom.baseEepHeader.macAddr);
 	sc->sc_led_newstate = otus_led_newstate_type3;	/* XXX */
 
-	printf("%s: MAC/BBP AR9170, RF AR%X, MIMO %dT%dR, address %s\n",
-	    sc->sc_dev.dv_xname, (sc->capflags & AR5416_OPFLAGS_11A) ?
+	device_printf(sc->sc_dev,
+	    "%s: MAC/BBP AR9170, RF AR%X, MIMO %dT%dR, address %s\n",
+	    __func__,
+	    (sc->capflags & AR5416_OPFLAGS_11A) ?
 	        0x9104 : ((sc->txmask == 0x5) ? 0x9102 : 0x9101),
 	    (sc->txmask == 0x5) ? 2 : 1, (sc->rxmask == 0x5) ? 2 : 1,
-	    ether_sprintf(ic->ic_myaddr));
+	    ether_sprintf(ic->ic_macaddr));
 
+	ic->ic_softc = sc;
 	ic->ic_phytype = IEEE80211_T_OFDM;	/* not only, but not used */
 	ic->ic_opmode = IEEE80211_M_STA;	/* default to BSS mode */
-	ic->ic_state = IEEE80211_S_INIT;
 
 	/* Set device capabilities. */
 	ic->ic_caps =
-	    IEEE80211_C_MONITOR |	/* monitor mode supported */
-	    IEEE80211_C_SHPREAMBLE |	/* short preamble supported */
-	    IEEE80211_C_SHSLOT |	/* short slot time supported */
-	    IEEE80211_C_WEP |		/* WEP */
-	    IEEE80211_C_RSN;		/* WPA/RSN */
+	    IEEE80211_C_STA |		/* station mode */
+#if 0
+	    IEEE80211_C_BGSCAN |	/* Background scan. */
+#endif
+	    IEEE80211_C_SHPREAMBLE |	/* Short preamble supported. */
+	    IEEE80211_C_WME |		/* WME/QoS */
+	    IEEE80211_C_SHSLOT |	/* Short slot time supported. */
+	    IEEE80211_C_WPA;		/* WPA/RSN. */
 
+	/* XXX TODO: 11n */
+
+#if 0
 	if (sc->eeprom.baseEepHeader.opCapFlags & AR5416_OPFLAGS_11G) {
 		/* Set supported .11b and .11g rates. */
 		ic->ic_sup_rates[IEEE80211_MODE_11B] =
@@ -416,32 +489,46 @@ otus_attachhook(void *xsc)
 		ic->ic_sup_rates[IEEE80211_MODE_11A] =
 		    ieee80211_std_rateset_11a;
 	}
+#endif
 
+#if 0
 	/* Build the list of supported channels. */
 	otus_get_chanlist(sc);
+#else
+	/* Set supported .11b and .11g rates. */
+	bands = 0;
+	if (sc->eeprom.baseEepHeader.opCapFlags & AR5416_OPFLAGS_11G) {
+		setbit(&bands, IEEE80211_MODE_11B);
+		setbit(&bands, IEEE80211_MODE_11G);
+	}
+	if (sc->eeprom.baseEepHeader.opCapFlags & AR5416_OPFLAGS_11A) {
+		setbit(&bands, IEEE80211_MODE_11A);
+	}
+#if 0
+	if (sc->sc_ht)
+		setbit(&bands, IEEE80211_MODE_11NG);
+#endif
+	ieee80211_init_channels(ic, NULL, &bands);
+#endif
 
-	ifp->if_softc = sc;
-	ifp->if_flags = IFF_BROADCAST | IFF_SIMPLEX | IFF_MULTICAST;
-	ifp->if_ioctl = otus_ioctl;
-	ifp->if_start = otus_start;
-	ifp->if_watchdog = otus_watchdog;
-	IFQ_SET_READY(&ifp->if_snd);
-	memcpy(ifp->if_xname, sc->sc_dev.dv_xname, IFNAMSIZ);
+	ieee80211_ifattach(ic);
+	ic->ic_raw_xmit = otus_raw_xmit;
+	ic->ic_scan_start = otus_scan_start;
+	ic->ic_scan_end = otus_scan_end;
+	ic->ic_set_channel = otus_set_channel;
+	ic->ic_vap_create = otus_vap_create;
+	ic->ic_vap_delete = otus_vap_delete;
+	ic->ic_update_mcast = otus_update_mcast;
+	ic->ic_parent = otus_parent;
+	ic->ic_transmit = otus_transmit;
+	ic->ic_update_chw = otus_update_chw;
+	ic->ic_ampdu_enable = otus_ampdu_enable;
+	ic->ic_wme.wme_update = otus_wme_update;
 
-	if_attach(ifp);
-	ieee80211_ifattach(ifp);
-	ic->ic_node_alloc = otus_node_alloc;
-	ic->ic_newassoc = otus_newassoc;
-	ic->ic_updateslot = otus_updateslot;
-	ic->ic_updateedca = otus_updateedca;
 #ifdef notyet
 	ic->ic_set_key = otus_set_key;
 	ic->ic_delete_key = otus_delete_key;
 #endif
-	/* Override state transition machine. */
-	sc->sc_newstate = ic->ic_newstate;
-	ic->ic_newstate = otus_newstate;
-	ieee80211_media_init(ifp, otus_media_change, ieee80211_media_status);
 
 #if NBPFILTER > 0
 	bpfattach(&sc->sc_drvbpf, ifp, DLT_IEEE802_11_RADIO,

@@ -938,6 +938,13 @@ enum {
 	OTUS_N_XFER
 };
 
+struct otus_vap {
+	struct ieee80211vap	vap;
+	int			(*newstate)(struct ieee80211vap *,
+				    enum ieee80211_state, int);
+};
+#define	OTUS_VAP(vap)		((struct otus_vap *)(vap))
+
 #define	OTUS_LOCK(sc)		mtx_lock(&(sc)->sc_mtx)
 #define	OTUS_UNLOCK(sc)		mtx_unlock(&(sc)->sc_mtx)
 #define	OTUS_LOCK_ASSERT(sc)	mtx_assert(&(sc)->sc_mtx, MA_OWNED)
