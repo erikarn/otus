@@ -137,7 +137,8 @@ int		otus_read_eeprom(struct otus_softc *);
 void		otus_newassoc(struct ieee80211com *, struct ieee80211_node *,
 		    int);
 void		otus_cmd_rxeof(struct otus_softc *, uint8_t *, int);
-void		otus_sub_rxeof(struct otus_softc *, uint8_t *, int);
+void		otus_sub_rxeof(struct otus_softc *, uint8_t *, int,
+		    struct mbufq *);
 int		otus_tx(struct otus_softc *, struct mbuf *,
 		    struct ieee80211_node *, struct otus_data *);
 void		otus_start(struct ifnet *);
@@ -1278,10 +1279,9 @@ otus_cmd_rxeof(struct otus_softc *sc, uint8_t *buf, int len)
 }
 
 void
-otus_sub_rxeof(struct otus_softc *sc, uint8_t *buf, int len)
+otus_sub_rxeof(struct otus_softc *sc, uint8_t *buf, int len, struct mbufq *rxq)
 {
 	struct ieee80211com *ic = &sc->sc_ic;
-	struct ifnet *ifp = &ic->ic_if;
 	struct ieee80211_rxinfo rxi;
 	struct ieee80211_node *ni;
 	struct ar_rx_tail *tail;
@@ -1306,7 +1306,7 @@ otus_sub_rxeof(struct otus_softc *sc, uint8_t *buf, int len)
 	/* Received MPDU. */
 	if (__predict_false(len < AR_PLCP_HDR_LEN + sizeof (*tail))) {
 		DPRINTF("MPDU too short %d\n", len);
-		ifp->if_ierrors++;
+		counter_u64_add(ic->ic_ierrors, 1);
 		return;
 	}
 	tail = (struct ar_rx_tail *)(plcp + len - sizeof (*tail));
@@ -1321,7 +1321,7 @@ otus_sub_rxeof(struct otus_softc *sc, uint8_t *buf, int len)
 			ic->ic_stats.is_rx_locmicfail++;
 			ieee80211_michael_mic_failure(ic, 0);
 		}
-		ifp->if_ierrors++;
+		counter_u64_add(ic->ic_ierrors, 1);
 		return;
 	}
 	/* Compute MPDU's length. */
@@ -1392,9 +1392,9 @@ otus_sub_rxeof(struct otus_softc *sc, uint8_t *buf, int len)
 	}
 #endif
 
-	printf("%s: TODO: actually return mbuf! (%p)\n",
-	    __func__);
-	m_freem(m);
+	/* XXX make a method */
+	/* XXX RSSI, etc */
+	STAILQ_INSERT_TAIL(&rxq->mq_head, m, m_stailqpkt);
 
 #if 0
 	OTUS_UNLOCK(sc);
@@ -1411,7 +1411,7 @@ otus_sub_rxeof(struct otus_softc *sc, uint8_t *buf, int len)
 }
 
 static void
-otus_rxeof(struct usb_xfer *xfer, struct rsu_data *data)
+otus_rxeof(struct usb_xfer *xfer, struct otus_data *data, struct mbufq *rxq)
 {
 	struct otus_softc *sc = data->sc;
 	caddr_t buf = data->buf;
@@ -1433,7 +1433,7 @@ otus_rxeof(struct usb_xfer *xfer, struct rsu_data *data)
 			break;
 		}
 		/* Process sub-xfer. */
-		otus_sub_rxeof(sc, (uint8_t *)&head[1], hlen);
+		otus_sub_rxeof(sc, (uint8_t *)&head[1], hlen, rxq);
 
 		/* Next sub-xfer is aligned on a 32-bit boundary. */
 		hlen = (sizeof (*head) + hlen + 3) & ~3;
@@ -1449,10 +1449,13 @@ otus_bulk_rx_callback(struct usb_xfer *xfer, usb_error_t error)
 	struct ieee80211com *ic = &sc->sc_ic;
 	struct ieee80211_frame *wh;
 	struct ieee80211_node *ni;
-	struct mbuf *m = NULL, *next;
+	struct mbuf *m;
+	struct mbufq scrx;
 	struct otus_data *data;
 
-	OTUS_ASSERT_LOCKED(sc);
+	OTUS_LOCK_ASSERT(sc);
+
+	mbufq_init(&scrx, 1024);
 
 	switch (USB_GET_STATE(xfer)) {
 	case USB_ST_TRANSFERRED:
@@ -1460,11 +1463,15 @@ otus_bulk_rx_callback(struct usb_xfer *xfer, usb_error_t error)
 		if (data == NULL)
 			goto tr_setup;
 		STAILQ_REMOVE_HEAD(&sc->sc_rx_active, next);
-		m = otus_rxeof(xfer, data);
+		otus_rxeof(xfer, data, &scrx);
 		STAILQ_INSERT_TAIL(&sc->sc_rx_inactive, data, next);
 		/* FALLTHROUGH */
 	case USB_ST_SETUP:
 tr_setup:
+		/*
+		 * XXX TODO: what if sc_rx isn't empty, but data
+		 * is empty?  Then we leak mbufs.
+		 */
 		data = STAILQ_FIRST(&sc->sc_rx_inactive);
 		if (data == NULL) {
 			KASSERT(m == NULL, ("mbuf isn't NULL"));
@@ -1481,9 +1488,9 @@ tr_setup:
 		 * callback and safe to unlock.
 		 */
 		OTUS_UNLOCK(sc);
-		while (m != NULL) {
-			next = m->m_next;
-			m->m_next = NULL;
+		while ((m = mbufq_dequeue(&scrx)) != NULL) {
+			/* XXX TODO: put rssi info in an RX mbuf tag */
+			int rssi = 1;
 			wh = mtod(m, struct ieee80211_frame *);
 			ni = ieee80211_find_rxnode(ic,
 			    (struct ieee80211_frame_min *)wh);
@@ -1494,7 +1501,6 @@ tr_setup:
 				ieee80211_free_node(ni);
 			} else
 				(void)ieee80211_input_all(ic, m, rssi, 0);
-			m = next;
 		}
 		OTUS_LOCK(sc);
 		break;
@@ -1515,10 +1521,13 @@ tr_setup:
 }
 
 static void
-otus_txeof(struct usb_xfer *xfer, struct rsu_data *data)
+otus_txeof(struct usb_xfer *xfer, struct otus_data *data)
 {
+	struct otus_softc *sc = usbd_xfer_softc(xfer);
 
 	DPRINTF("%s: called; data=%p\n", __func__, data);
+
+	OTUS_LOCK_ASSERT(sc);
 
 	if (data->m) {
 		/* XXX status? */
@@ -1530,7 +1539,7 @@ otus_txeof(struct usb_xfer *xfer, struct rsu_data *data)
 }
 
 static void
-otus_txcmdeof(struct usb_xfer *xfer, struct rsu_data *data)
+otus_txcmdeof(struct usb_xfer *xfer, struct otus_data *data)
 {
 	struct otus_softc *sc = usbd_xfer_softc(xfer);
 
@@ -1548,8 +1557,8 @@ otus_txcmdeof(struct usb_xfer *xfer, struct rsu_data *data)
 	 * Note note: make sure we don't free buffers being
 	 * waited on from underneath the waiter.  Ugh.
 	 */
-	DPRINTF("%s: called; data=%p\n", __func__, data);
-	rsu_freebuf(sc, data);
+	device_printf(sc->sc_dev, "%s: called; data=%p\n", __func__, data);
+	otus_freebuf(sc, data);
 }
 
 static void
@@ -1560,7 +1569,7 @@ otus_bulk_tx_callback_sub(struct usb_xfer *xfer, usb_error_t error,
 	struct ieee80211com *ic = &sc->sc_ic;
 	struct otus_data *data;
 
-	RSU_ASSERT_LOCKED(sc);
+	OTUS_LOCK_ASSERT(sc);
 
 	switch (USB_GET_STATE(xfer)) {
 	case USB_ST_TRANSFERRED:
@@ -1589,8 +1598,8 @@ tr_setup:
 		data = STAILQ_FIRST(&sc->sc_tx_active[which]);
 		if (data != NULL) {
 			STAILQ_REMOVE_HEAD(&sc->sc_tx_active[which], next);
-			rsu_txeof(xfer, data);
-			rsu_freebuf(sc, data);
+			otus_txeof(xfer, data);
+			otus_freebuf(sc, data);
 		}
 		counter_u64_add(ic->ic_oerrors, 1);
 
@@ -1606,11 +1615,13 @@ static void
 otus_bulk_cmd_callback(struct usb_xfer *xfer, usb_error_t error)
 {
 	struct otus_softc *sc = usbd_xfer_softc(xfer);
+#if 0
 	struct ieee80211com *ic = &sc->sc_ic;
+#endif
 	struct otus_data *data;
 	uint8_t which = OTUS_BULK_CMD;
 
-	RSU_ASSERT_LOCKED(sc);
+	OTUS_LOCK_ASSERT(sc);
 
 	switch (USB_GET_STATE(xfer)) {
 	case USB_ST_TRANSFERRED:
@@ -1670,8 +1681,7 @@ otus_bulk_irq_callback(struct usb_xfer *xfer, usb_error_t error)
 		 * "actlen" has the total length for all frames
 		 * transferred.
 		 */
-		DPRINTF(sc, OTUS_DEBUG_USB_XFER,
-		    "%s: comp; %d bytes\n",
+		DPRINTF("%s: comp; %d bytes\n",
 		    __func__,
 		    actlen);
 #if 0
@@ -1683,8 +1693,7 @@ otus_bulk_irq_callback(struct usb_xfer *xfer, usb_error_t error)
 		/*
 		 * Setup xfer frame lengths/count and data
 		 */
-		DPRINTF(sc, OTUS_DEBUG_USB_XFER,
-		    "%s: setup\n", __func__);
+		DPRINTF("%s: setup\n", __func__);
 		usbd_xfer_set_frame_len(xfer, 0, usbd_xfer_max_len(xfer));
 		usbd_transfer_submit(xfer);
 		break;
