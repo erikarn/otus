@@ -923,6 +923,7 @@ struct otus_vap {
 				    enum ieee80211_state, int);
 };
 #define	OTUS_VAP(vap)		((struct otus_vap *)(vap))
+#define	OTUS_NODE(ni)		((struct otus_node *)(ni))
 
 #define	OTUS_LOCK(sc)		mtx_lock(&(sc)->sc_mtx)
 #define	OTUS_UNLOCK(sc)		mtx_unlock(&(sc)->sc_mtx)

@@ -991,7 +991,8 @@ otus_newstate(struct ieee80211vap *vap, enum ieee80211_state nstate, int arg)
 			otus_newassoc(ic, ni, 1);
 
 			/* Start calibration timer. */
-			timeout_add_sec(&sc->calib_to, 1);
+			taskqueue_enqueue_timeout(taskqueue_thread,
+			    &sc->calib_to, hz);
 		}
 		break;
 	default:
@@ -1103,6 +1104,7 @@ otus_node_alloc(struct ieee80211com *ic)
 	return malloc(sizeof (struct otus_node), M_DEVBUF, M_NOWAIT | M_ZERO);
 }
 
+#if 0
 int
 otus_media_change(struct ifnet *ifp)
 {
@@ -1129,6 +1131,7 @@ otus_media_change(struct ifnet *ifp)
 
 	return error;
 }
+#endif
 
 int
 otus_read_eeprom(struct otus_softc *sc)
@@ -1154,8 +1157,10 @@ otus_read_eeprom(struct otus_softc *sc)
 void
 otus_newassoc(struct ieee80211com *ic, struct ieee80211_node *ni, int isnew)
 {
+#if 0
 	struct otus_softc *sc = ic->ic_softc;
-	struct otus_node *on = (void *)ni;
+#endif
+	struct otus_node *on = OTUS_NODE(ni);
 	struct ieee80211_rateset *rs = &ni->ni_rates;
 	uint8_t rate;
 	int ridx, i;
@@ -1163,9 +1168,11 @@ otus_newassoc(struct ieee80211com *ic, struct ieee80211_node *ni, int isnew)
 	DPRINTF("new assoc isnew=%d addr=%s\n",
 	    isnew, ether_sprintf(ni->ni_macaddr));
 
+#if 0
 	ieee80211_amrr_node_init(&sc->amrr, &on->amn);
 	/* Start at lowest available bit-rate, AMRR will raise. */
 	ni->ni_txrate = 0;
+#endif
 
 	for (i = 0; i < rs->rs_nrates; i++) {
 		rate = rs->rs_rates[i] & IEEE80211_RATE_VAL;
@@ -1330,22 +1337,15 @@ otus_sub_rxeof(struct otus_softc *sc, uint8_t *buf, int len)
 	/* Provide a 32-bit aligned protocol header to the stack. */
 	align = (ieee80211_has_qos(wh) ^ ieee80211_has_addr4(wh)) ? 2 : 0;
 
-	MGETHDR(m, M_DONTWAIT, MT_DATA);
-	if (__predict_false(m == NULL)) {
-		ifp->if_ierrors++;
-		return;
+	m = m_get2(mlen, M_NOWAIT, MT_DATA, M_PKTHDR);
+	if (m == NULL) {
+		device_printf(sc->sc_dev, "%s: failed m_get2()\n", __func__);
+		counter_u64_add(ic->ic_ierrors, 1);
 	}
-	if (align + mlen > MHLEN) {
-		MCLGET(m, M_DONTWAIT);
-		if (__predict_false(!(m->m_flags & M_EXT))) {
-			ifp->if_ierrors++;
-			m_freem(m);
-			return;
-		}
-	}
+
 	/* Finalize mbuf. */
 	m->m_data += align;
-	memcpy(mtod(m, caddr_t), wh, mlen);
+	memcpy(mtod(m, uint8_t *), wh, mlen);
 	m->m_pkthdr.len = m->m_len = mlen;
 
 #if 0
