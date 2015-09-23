@@ -437,6 +437,7 @@ otus_wme_update(struct ieee80211com *ic)
 	struct otus_softc *sc = ic->ic_softc;
 
 	otus_updateedca(sc);
+	return (0);
 }
 
 static int
