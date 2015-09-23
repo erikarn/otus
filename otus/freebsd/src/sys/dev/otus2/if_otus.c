@@ -115,13 +115,11 @@ void		otus_free_tx_data_list(struct otus_softc *);
 int		otus_alloc_rx_data_list(struct otus_softc *);
 void		otus_free_rx_data_list(struct otus_softc *);
 void		otus_next_scan(void *, int);
-void		otus_task(void *);
 static void	otus_tx_task(void *, int pending);
 void		otus_do_async(struct otus_softc *,
 		    void (*)(struct otus_softc *, void *), void *, int);
-int		otus_newstate(struct ieee80211com *, enum ieee80211_state,
+int		otus_newstate(struct ieee80211vap *, enum ieee80211_state,
 		    int);
-void		otus_newstate_cb(struct otus_softc *, void *);
 int		otus_cmd(struct otus_softc *, uint8_t, const void *, int,
 		    void *);
 void		otus_write(struct otus_softc *, uint32_t, uint32_t);
@@ -139,10 +137,8 @@ void		otus_start(struct ifnet *);
 void		otus_watchdog(struct ifnet *);
 int		otus_ioctl(struct ifnet *, u_long, caddr_t);
 int		otus_set_multi(struct otus_softc *);
-void		otus_updateedca(struct ieee80211com *);
-void		otus_updateedca_cb(struct otus_softc *, void *);
-void		otus_updateslot(struct ieee80211com *);
-void		otus_updateslot_cb(struct otus_softc *, void *);
+void		otus_updateedca(struct otus_softc *sc);
+void		otus_updateslot(struct otus_softc *sc);
 int		otus_init_mac(struct otus_softc *);
 uint32_t	otus_phy_get_def(struct otus_softc *, uint32_t);
 int		otus_set_board_values(struct otus_softc *,
@@ -152,7 +148,7 @@ int		otus_program_phy(struct otus_softc *,
 int		otus_set_rf_bank4(struct otus_softc *,
 		    struct ieee80211_channel *);
 void		otus_get_delta_slope(uint32_t, uint32_t *, uint32_t *);
-int		otus_set_chan(struct otus_softc *, struct ieee80211_channel *,
+static int	otus_set_chan(struct otus_softc *, struct ieee80211_channel *,
 		    int);
 int		otus_set_key(struct ieee80211com *, struct ieee80211_node *,
 		    struct ieee80211_key *);
@@ -399,6 +395,80 @@ otus_parent(struct ieee80211com *ic)
 }
 
 static int
+otus_transmit(struct ieee80211com *ic, struct mbuf *m)
+{
+
+	/* XXX TODO: implement */
+	printf("%s: TODO\n", __func__);
+	return (ENXIO);
+}
+
+static int
+otus_raw_xmit(struct ieee80211_node *ni, struct mbuf *m,
+    const struct ieee80211_bpf_params *params)
+{
+	/* XXX TODO: implement */
+	printf("%s: TODO\n", __func__);
+	ieee80211_free_node(ni);
+	m_freem(m);
+	return (ENXIO);
+}
+
+static void
+otus_update_chw(struct ieee80211com *ic)
+{
+
+	printf("%s: TODO\n", __func__);
+}
+
+static void
+otus_set_channel(struct ieee80211com *ic)
+{
+	struct otus_softc *sc = ic->ic_softc;
+	device_printf(sc->sc_dev, "%s: set channel: %d\n",
+	    __func__,
+	    ic->ic_curchan->ic_freq);
+	(void) otus_set_chan(sc, ic->ic_curchan, 0);
+}
+
+static int
+otus_wme_update(struct ieee80211com *ic)
+{
+	struct otus_softc *sc = ic->ic_softc;
+
+	otus_updateedca(sc);
+}
+
+static int
+otus_ampdu_enable(struct ieee80211_node *ni, struct ieee80211_tx_ampdu *tap)
+{
+	/* For now, no A-MPDU TX support in the driver */
+	return (0);
+}
+
+static void
+otus_scan_start(struct ieee80211com *ic)
+{
+
+	printf("%s: TODO\n", __func__);
+}
+
+static void
+otus_scan_end(struct ieee80211com *ic)
+{
+
+	printf("%s: TODO\n", __func__);
+}
+
+static void
+otus_update_mcast(struct ieee80211com *ic)
+{
+	struct otus_softc *sc = ic->ic_softc;
+
+	(void) otus_set_multi(sc);
+}
+
+static int
 otus_attachhook(struct otus_softc *sc)
 {
 	struct ieee80211com *ic = &sc->sc_ic;
@@ -603,11 +673,13 @@ otus_load_firmware(struct otus_softc *sc, const char *name, uint32_t addr)
 	const struct firmware *fw;
 	int mlen, error, size;
 
+	error = 0;
+
 	/* Read firmware image from the filesystem. */
 	if ((fw = firmware_get(name)) == NULL) {
 		device_printf(sc->sc_dev,
 		    "%s: failed loadfirmware of file %s\n", __func__, name);
-		return error;
+		return (ENXIO);
 	}
 	req.bmRequestType = UT_WRITE_VENDOR_DEVICE;
 	req.bRequest = AR_FW_DOWNLOAD;
@@ -698,11 +770,6 @@ otus_close_pipes(struct otus_softc *sc)
 	otus_free_rx_data_list(sc);
 
 	usbd_transfer_unsetup(sc->sc_xfer, OTUS_N_XFER);
-
-	if (sc->data_tx_pipe != NULL)
-		usbd_close_pipe(sc->data_tx_pipe);
-	if (sc->cmd_tx_pipe != NULL)
-		usbd_close_pipe(sc->cmd_tx_pipe);
 }
 
 int
@@ -712,14 +779,15 @@ otus_alloc_tx_cmd(struct otus_softc *sc)
 
 	cmd->xfer = usbd_alloc_xfer(sc->sc_udev);
 	if (cmd->xfer == NULL) {
-		printf("%s: could not allocate xfer\n",
-		    sc->sc_dev.dv_xname);
+		device_printf(sc->sc_dev, "%s: could not allocate xfer\n",
+		    __func__);
 		return ENOMEM;
 	}
 	cmd->buf = usbd_alloc_buffer(cmd->xfer, OTUS_MAX_TXCMDSZ);
 	if (cmd->buf == NULL) {
-		printf("%s: could not allocate xfer buffer\n",
-		    sc->sc_dev.dv_xname);
+		device_printf(sc->sc_dev,
+		    "%s: could not allocate xfer buffer\n",
+		    __func__);
 		usbd_free_xfer(cmd->xfer);
 		return ENOMEM;
 	}
@@ -749,15 +817,17 @@ otus_alloc_tx_data_list(struct otus_softc *sc)
 
 		data->xfer = usbd_alloc_xfer(sc->sc_udev);
 		if (data->xfer == NULL) {
-			printf("%s: could not allocate xfer\n",
-			    sc->sc_dev.dv_xname);
+			device_printf(sc->sc_dev,
+			    "%s: could not allocate xfer\n",
+			    __func__);
 			error = ENOMEM;
 			goto fail;
 		}
 		data->buf = usbd_alloc_buffer(data->xfer, OTUS_TXBUFSZ);
 		if (data->buf == NULL) {
-			printf("%s: could not allocate xfer buffer\n",
-			    sc->sc_dev.dv_xname);
+			device_printf(sc->sc_dev,
+			    "%s: could not allocate xfer buffer\n",
+			    __func__);
 			error = ENOMEM;
 			goto fail;
 		}
@@ -794,15 +864,17 @@ otus_alloc_rx_data_list(struct otus_softc *sc)
 
 		data->xfer = usbd_alloc_xfer(sc->sc_udev);
 		if (data->xfer == NULL) {
-			printf("%s: could not allocate xfer\n",
-			    sc->sc_dev.dv_xname);
+			device_printf(sc->sc_dev,
+			    "%s: could not allocate xfer\n",
+			    __func__);
 			error = ENOMEM;
 			goto fail;
 		}
 		data->buf = usbd_alloc_buffer(data->xfer, OTUS_RXBUFSZ);
 		if (data->buf == NULL) {
-			printf("%s: could not allocate xfer buffer\n",
-			    sc->sc_dev.dv_xname);
+			device_printf(sc->sc_dev,
+			    "%s: could not allocate xfer buffer\n",
+			    __func__);
 			error = ENOMEM;
 			goto fail;
 		}
@@ -829,6 +901,7 @@ otus_free_rx_data_list(struct otus_softc *sc)
 void
 otus_next_scan(void *arg, int pending)
 {
+#if 0
 	struct otus_softc *sc = arg;
 
 	if (usbd_is_dying(sc->sc_udev))
@@ -840,112 +913,55 @@ otus_next_scan(void *arg, int pending)
 		ieee80211_next_scan(&sc->sc_ic.ic_if);
 
 	usbd_ref_decr(sc->sc_udev);
-}
-
-void
-otus_task(void *arg)
-{
-	struct otus_softc *sc = arg;
-	struct otus_host_cmd_ring *ring = &sc->cmdq;
-	struct otus_host_cmd *cmd;
-	int s;
-
-	/* Process host commands. */
-	s = splusb();
-	while (ring->next != ring->cur) {
-		cmd = &ring->cmd[ring->next];
-		splx(s);
-		/* Callback. */
-		cmd->cb(sc, cmd->data);
-		s = splusb();
-		ring->queued--;
-		ring->next = (ring->next + 1) % OTUS_HOST_CMD_RING_COUNT;
-	}
-	splx(s);
-}
-
-void
-otus_do_async(struct otus_softc *sc, void (*cb)(struct otus_softc *, void *),
-    void *arg, int len)
-{
-	struct otus_host_cmd_ring *ring = &sc->cmdq;
-	struct otus_host_cmd *cmd;
-	int s;
-
-	s = splusb();
-	cmd = &ring->cmd[ring->cur];
-	cmd->cb = cb;
-	KASSERT(len <= sizeof (cmd->data));
-	memcpy(cmd->data, arg, len);
-	ring->cur = (ring->cur + 1) % OTUS_HOST_CMD_RING_COUNT;
-
-	/* If there is no pending command already, schedule a task. */
-	if (++ring->queued == 1)
-		usb_add_task(sc->sc_udev, &sc->sc_task);
-	splx(s);
+#endif
 }
 
 int
-otus_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
+otus_newstate(struct ieee80211vap *vap, enum ieee80211_state nstate, int arg)
 {
+	struct otus_vap *uvp = OTUS_VAP(vap);
+	struct ieee80211com *ic = vap->iv_ic;
 	struct otus_softc *sc = ic->ic_softc;
-	struct otus_cmd_newstate cmd;
-
-	/* Do it in a process context. */
-	cmd.state = nstate;
-	cmd.arg = arg;
-	otus_do_async(sc, otus_newstate_cb, &cmd, sizeof cmd);
-	return 0;
-}
-
-void
-otus_newstate_cb(struct otus_softc *sc, void *arg)
-{
-	struct otus_cmd_newstate *cmd = arg;
-	struct ieee80211com *ic = &sc->sc_ic;
 	struct ieee80211_node *ni;
-	int s;
+	enum ieee80211_state ostate;
 
-	s = splnet();
+	ostate = vap->iv_state;
+	DPRINTF("%s: %s -> %s\n", __func__,
+	    ieee80211_state_name[ostate],
+	    ieee80211_state_name[nstate]);
 
-	switch (cmd->state) {
-	case IEEE80211_S_INIT:
-		break;
+	IEEE80211_UNLOCK(ic);
 
-	case IEEE80211_S_SCAN:
-		(void)otus_set_chan(sc, ic->ic_bss->ni_chan, 0);
-		if (!usbd_is_dying(sc->sc_udev))
-			timeout_add_msec(&sc->scan_to, 200);
-		break;
+	OTUS_LOCK(sc);
 
-	case IEEE80211_S_AUTH:
-	case IEEE80211_S_ASSOC:
-		(void)otus_set_chan(sc, ic->ic_bss->ni_chan, 0);
-		break;
+	/* XXX TODO: more fleshing out! */
 
+	switch (nstate) {
 	case IEEE80211_S_RUN:
-		(void)otus_set_chan(sc, ic->ic_bss->ni_chan, 1);
-
-		ni = ic->ic_bss;
+		ni = ieee80211_ref_node(vap->iv_bss);
 
 		if (ic->ic_opmode == IEEE80211_M_STA) {
-			otus_updateslot(ic);
+			otus_updateslot(sc);
 			otus_set_bssid(sc, ni->ni_bssid);
 
 			/* Fake a join to init the Tx rate. */
 			otus_newassoc(ic, ni, 1);
 
 			/* Start calibration timer. */
-			if (!usbd_is_dying(sc->sc_udev))
-				timeout_add_sec(&sc->calib_to, 1);
+			timeout_add_sec(&sc->calib_to, 1);
 		}
+		break;
+	default:
 		break;
 	}
 
-	sc->sc_led_newstate(sc);
-	(void)sc->sc_newstate(ic, cmd->state, cmd->arg);
+	/* XXX TODO: calibration? */
 
-	splx(s);
+	sc->sc_led_newstate(sc);
+
+	OTUS_UNLOCK(sc);
+	IEEE80211_LOCK(ic);
+	return (uvp->newstate(vap, nstate, arg));
 }
 
 int
@@ -956,6 +972,8 @@ otus_cmd(struct otus_softc *sc, uint8_t code, const void *idata, int ilen,
 	struct ar_cmd_hdr *hdr;
 	int s, xferlen, error;
 
+	OTUS_LOCK_ASSERT(sc);
+
 	/* Always bulk-out a multiple of 4 bytes. */
 	xferlen = (sizeof (*hdr) + ilen + 3) & ~3;
 
@@ -965,10 +983,10 @@ otus_cmd(struct otus_softc *sc, uint8_t code, const void *idata, int ilen,
 	hdr->token = ++cmd->token;	/* Don't care about endianness. */
 	memcpy((uint8_t *)&hdr[1], idata, ilen);
 
-	DPRINTFN(2, ("sending command code=0x%02x len=%d token=%d\n",
-	    code, ilen, hdr->token));
+	device_printf(sc->sc_dev,
+	    "%s: sending command code=0x%02x len=%d token=%d\n",
+	    __func__, code, ilen, hdr->token);
 
-	s = splusb();
 	cmd->odata = odata;
 	cmd->done = 0;
 
@@ -977,18 +995,18 @@ otus_cmd(struct otus_softc *sc, uint8_t code, const void *idata, int ilen,
 	    OTUS_CMD_TIMEOUT, NULL);
 	error = usbd_transfer(cmd->xfer);
 	if (error != 0) {
-		splx(s);
-		printf("%s: could not send command 0x%x (error=%s)\n",
-		    sc->sc_dev.dv_xname, code, usbd_errstr(error));
+		device_printf(sc->sc_dev,
+		    "%s: could not send command 0x%x (error=%s)\n",
+		    __func__, code, usbd_errstr(error));
 		return EIO;
 	}
 	if (!cmd->done)
-		error = tsleep(cmd, PCATCH, "otuscmd", hz);
+		error = msleep(cmd, &sc->sc_mtx, PCATCH, "otuscmd", hz);
 	cmd->odata = NULL;	/* In case answer is received too late. */
-	splx(s);
 	if (error != 0) {
-		printf("%s: timeout waiting for command 0x%02x reply\n",
-		    sc->sc_dev.dv_xname, code);
+		device_printf(sc->sc_dev,
+		    "%s: timeout waiting for command 0x%02x reply\n",
+		    __func__, code);
 	}
 	return error;
 }
@@ -1600,87 +1618,16 @@ otus_watchdog(struct ifnet *ifp)
 }
 
 int
-otus_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
-{
-	struct otus_softc *sc = ifp->if_softc;
-	struct ieee80211com *ic = &sc->sc_ic;
-	struct ifaddr *ifa;
-	struct ifreq *ifr;
-	int s, error = 0;
-
-	if (usbd_is_dying(sc->sc_udev))
-		return ENXIO;
-
-	usbd_ref_incr(sc->sc_udev);
-
-	s = splnet();
-
-	switch (cmd) {
-	case SIOCSIFADDR:
-		ifa = (struct ifaddr *)data;
-		ifp->if_flags |= IFF_UP;
-		if (ifa->ifa_addr->sa_family == AF_INET)
-			arp_ifinit(&ic->ic_ac, ifa);
-		/* FALLTHROUGH */
-	case SIOCSIFFLAGS:
-		if (ifp->if_flags & IFF_UP) {
-			if ((ifp->if_flags & IFF_RUNNING) &&
-			    ((ifp->if_flags ^ sc->sc_if_flags) &
-			     (IFF_ALLMULTI | IFF_PROMISC)) != 0) {
-				otus_set_multi(sc);
-			} else if (!(ifp->if_flags & IFF_RUNNING))
-				otus_init(ifp);
-
-		} else if (ifp->if_flags & IFF_RUNNING)
-			otus_stop(ifp);
-
-		sc->sc_if_flags = ifp->if_flags;
-		break;
-	case SIOCADDMULTI:
-	case SIOCDELMULTI:
-		ifr = (struct ifreq *)data;
-		error = (cmd == SIOCADDMULTI) ?
-		    ether_addmulti(ifr, &ic->ic_ac) :
-		    ether_delmulti(ifr, &ic->ic_ac);
-		if (error == ENETRESET)
-			error = 0;
-		break;
-	case SIOCS80211CHANNEL:
-		error = ieee80211_ioctl(ifp, cmd, data);
-		if (error == ENETRESET &&
-		    ic->ic_opmode == IEEE80211_M_MONITOR) {
-			if ((ifp->if_flags & (IFF_UP | IFF_RUNNING)) ==
-			    (IFF_UP | IFF_RUNNING))
-				otus_set_chan(sc, ic->ic_ibss_chan, 0);
-			error = 0;
-		}
-		break;
-	default:
-		error = ieee80211_ioctl(ifp, cmd, data);
-	}
-
-	if (error == ENETRESET) {
-		if ((ifp->if_flags & (IFF_UP | IFF_RUNNING)) ==
-		    (IFF_UP | IFF_RUNNING))
-			otus_init(ifp);
-		error = 0;
-	}
-
-	splx(s);
-
-	usbd_ref_decr(sc->sc_udev);
-
-	return error;
-}
-
-int
 otus_set_multi(struct otus_softc *sc)
 {
+	device_printf(sc->sc_dev, "%s: XXX TODO\n", __func__);
+#if 0
 	struct arpcom *ac = &sc->sc_ic.ic_ac;
 	struct ifnet *ifp = &ac->ac_if;
 	struct ether_multi *enm;
 	struct ether_multistep step;
 	uint32_t lo, hi;
+	int r;
 	uint8_t bit;
 
 	if (ac->ac_multirangecnt > 0)
@@ -1702,29 +1649,26 @@ otus_set_multi(struct otus_softc *sc)
 	}
  done:
 	hi |= 1U << 31;	/* Make sure the broadcast bit is set. */
+
+	OTUS_LOCK(sc);
 	otus_write(sc, AR_MAC_REG_GROUP_HASH_TBL_L, lo);
 	otus_write(sc, AR_MAC_REG_GROUP_HASH_TBL_H, hi);
-	return otus_write_barrier(sc);
+	r = otus_write_barrier(sc);
+	OTUS_UNLOCK(sc);
+	return (r);
+#endif
 }
 
-void
-otus_updateedca(struct ieee80211com *ic)
-{
-	/* Do it in a process context. */
-	otus_do_async(ic->ic_softc, otus_updateedca_cb, NULL, 0);
-}
-
-/* ARGSUSED */
-void
-otus_updateedca_cb(struct otus_softc *sc, void *arg)
+static void
+otus_updateedca(struct otus_softc *sc)
 {
 #define EXP2(val)	((1 << (val)) - 1)
 #define AIFS(val)	((val) * 9 + 10)
 	struct ieee80211com *ic = &sc->sc_ic;
-	const struct ieee80211_edca_ac_params *edca;
+	const struct wmeParams *edca;
 	int s;
 
-	s = splnet();
+	OTUS_LOCK(sc);
 
 	edca = (ic->ic_flags & IEEE80211_F_QOS) ?
 	    ic->ic_edca_ac : otus_edca_def;
@@ -1764,29 +1708,24 @@ otus_updateedca_cb(struct otus_softc *sc, void *arg)
 	    edca[EDCA_AC_VO].ac_txoplimit << 16 |
 	    edca[EDCA_AC_VI].ac_txoplimit);
 
-	splx(s);
-
 	(void)otus_write_barrier(sc);
+
+	OTUS_UNLOCK(sc);
 #undef AIFS
 #undef EXP2
 }
 
-void
-otus_updateslot(struct ieee80211com *ic)
+static void
+otus_updateslot(struct otus_softc *sc);
 {
-	/* Do it in a process context. */
-	otus_do_async(ic->ic_softc, otus_updateslot_cb, NULL, 0);
-}
-
-/* ARGSUSED */
-void
-otus_updateslot_cb(struct otus_softc *sc, void *arg)
-{
+	struct ieee80211com *ic = &sc->sc_ic;
 	uint32_t slottime;
 
-	slottime = (sc->sc_ic.ic_flags & IEEE80211_F_SHSLOT) ? 9 : 20;
+	slottime = (ic->ic_flags & IEEE80211_F_SHSLOT) ? 9 : 20;
+	OTUS_LOCK(sc);
 	otus_write(sc, AR_MAC_REG_SLOT_TIME, slottime << 10);
 	(void)otus_write_barrier(sc);
+	OTUS_UNLOCK(sc);
 }
 
 int
@@ -1844,7 +1783,7 @@ otus_init_mac(struct otus_softc *sc)
 		return error;
 
 	/* Set default EDCA parameters. */
-	otus_updateedca_cb(sc, NULL);
+	otus_updateedca(sc);
 
 	return 0;
 }
@@ -2065,7 +2004,7 @@ otus_get_delta_slope(uint32_t coeff, uint32_t *exponent, uint32_t *mantissa)
 #undef COEFF_SCALE_SHIFT
 }
 
-int
+static int
 otus_set_chan(struct otus_softc *sc, struct ieee80211_channel *c, int assoc)
 {
 	struct ieee80211com *ic = &sc->sc_ic;
