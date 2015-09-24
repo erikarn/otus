@@ -1055,7 +1055,7 @@ otus_cmd(struct otus_softc *sc, uint8_t code, const void *idata, int ilen,
 	cmd->odata = odata;
 	cmd->done = 0;
 
-	/* There's only one command to queue to this endpoint */
+	/* Queue the command to the endpoint */
 	usbd_transfer_start(sc->sc_xfer[which]);
 
 #if 0
