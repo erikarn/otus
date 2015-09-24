@@ -868,24 +868,23 @@ struct otus_tx_radiotap_header {
 
 struct otus_softc;
 
-#if 0
+/* Firmware commands */
 struct otus_tx_cmd {
+	struct otus_softc	*sc;
 	uint8_t			*buf;
-	void			*odata;
+	uint16_t		buflen;
+	void *			*odata;
 	uint16_t		token;
 	uint8_t			done;
-	int			ready;
+	STAILQ_ENTRY(otus_tx_cmd)	next_cmd;
 };
-#endif
 
-/* TX, RX, cmd buffers */
+/* TX, RX buffers */
 struct otus_data {
 	struct otus_softc	*sc;
 	uint8_t			*buf;
 	uint16_t		buflen;
 	struct mbuf		*m;
-	void			*odata;
-	int			done;
 	struct ieee80211_node	*ni;
 	STAILQ_ENTRY(otus_data)	next;
 };
@@ -936,6 +935,7 @@ struct otus_vap {
 /* intr/cmd endpoint dump says 0x40 */
 #define	OTUS_MAX_CTRLSZ		64
 
+#define	OTUS_CMD_LIST_COUNT	32
 #define	OTUS_RX_LIST_COUNT	128
 #define	OTUS_TX_LIST_COUNT	32
 
@@ -984,6 +984,8 @@ struct otus_softc {
 
 	struct otus_data		sc_rx[OTUS_RX_LIST_COUNT];
 	struct otus_data		sc_tx[OTUS_TX_LIST_COUNT];
+	struct otus_tx_cmd		sc_cmd[OTUS_CMD_LIST_COUNT];
+
 	struct usb_xfer			*sc_xfer[OTUS_N_XFER];
 
 	STAILQ_HEAD(, otus_data)	sc_rx_active;
@@ -991,6 +993,11 @@ struct otus_softc {
 	STAILQ_HEAD(, otus_data)	sc_tx_active[OTUS_N_XFER];
 	STAILQ_HEAD(, otus_data)	sc_tx_inactive;
 	STAILQ_HEAD(, otus_data)	sc_tx_pending[OTUS_N_XFER];
+
+	STAILQ_HEAD(, otus_tx_cmd)	sc_cmd_active;
+	STAILQ_HEAD(, otus_tx_cmd)	sc_cmd_inactive;
+	STAILQ_HEAD(, otus_tx_cmd)	sc_cmd_pending;
+	STAILQ_HEAD(, otus_tx_cmd)	sc_cmd_waiting;
 
 	union {
 		struct otus_rx_radiotap_header th;

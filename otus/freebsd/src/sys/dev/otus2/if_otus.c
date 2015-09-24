@@ -123,8 +123,8 @@ int		otus_load_firmware(struct otus_softc *, const char *,
 int		otus_open_pipes(struct otus_softc *);
 void		otus_close_pipes(struct otus_softc *);
 
-static int	otus_alloc_tx_cmd(struct otus_softc *);
-static void	otus_free_tx_cmd(struct otus_softc *);
+static int	otus_alloc_tx_cmd_list(struct otus_softc *);
+static void	otus_free_tx_cmd_list(struct otus_softc *);
 
 static int	otus_alloc_rx_list(struct otus_softc *);
 static void	otus_free_rx_list(struct otus_softc *);
@@ -134,6 +134,10 @@ static void	otus_free_list(struct otus_softc *, struct otus_data [], int);
 static struct otus_data *_otus_getbuf(struct otus_softc *);
 static struct otus_data *otus_getbuf(struct otus_softc *);
 static void	otus_freebuf(struct otus_softc *, struct otus_data *);
+
+static struct otus_tx_cmd *_otus_get_txcmd(struct otus_softc *);
+static struct otus_tx_cmd *otus_get_txcmd(struct otus_softc *);
+static void	otus_free_txcmd(struct otus_softc *, struct otus_tx_cmd *);
 
 void		otus_next_scan(void *, int);
 static void	otus_tx_task(void *, int pending);
@@ -755,7 +759,7 @@ otus_open_pipes(struct otus_softc *sc)
 
 	OTUS_UNLOCK_ASSERT(sc);
 
-	if ((error = otus_alloc_tx_cmd(sc)) != 0) {
+	if ((error = otus_alloc_tx_cmd_list(sc)) != 0) {
 		device_printf(sc->sc_dev,
 		    "%s: could not allocate command xfer\n",
 		    __func__);
@@ -787,23 +791,90 @@ fail:	otus_close_pipes(sc);
 void
 otus_close_pipes(struct otus_softc *sc)
 {
-	otus_free_tx_cmd(sc);
+	otus_free_tx_cmd_list(sc);
 	otus_free_tx_list(sc);
 	otus_free_rx_list(sc);
 
 	usbd_transfer_unsetup(sc->sc_xfer, OTUS_N_XFER);
 }
 
-static int
-otus_alloc_tx_cmd(struct otus_softc *sc)
+static void
+otus_free_cmd_list(struct otus_softc *sc, struct otus_tx_cmd cmd[], int ndata)
 {
+	int i;
+
+	/* XXX TODO: someone has to have waken up waiters! */
+	for (i = 0; i < ndata; i++) {
+		struct otus_tx_cmd *dp = &cmd[i];
+
+		if (dp->buf != NULL) {
+			free(dp->buf, M_USBDEV);
+			dp->buf = NULL;
+		}
+	}
+}
+
+static int
+otus_alloc_cmd_list(struct otus_softc *sc, struct otus_tx_cmd cmd[],
+    int ndata, int maxsz)
+{
+	int i, error;
+
+	for (i = 0; i < ndata; i++) {
+		struct otus_tx_cmd *dp = &cmd[i];
+		dp->sc = sc;
+		dp->buf = malloc(maxsz, M_USBDEV, M_NOWAIT);
+		dp->odata = NULL;
+		if (dp->buf == NULL) {
+			device_printf(sc->sc_dev,
+			    "could not allocate buffer\n");
+			error = ENOMEM;
+			goto fail;
+		}
+	}
+
+	return (0);
+fail:
+	otus_free_cmd_list(sc, cmd, ndata);
+	return (error);
+}
+
+static int
+otus_alloc_tx_cmd_list(struct otus_softc *sc)
+{
+	int error, i;
+
+	error = otus_alloc_cmd_list(sc, sc->sc_cmd, OTUS_CMD_LIST_COUNT,
+	    OTUS_MAX_TXCMDSZ);
+	if (error != 0)
+		return (error);
+
+	STAILQ_INIT(&sc->sc_cmd_active);
+	STAILQ_INIT(&sc->sc_cmd_inactive);
+	STAILQ_INIT(&sc->sc_cmd_pending);
+	STAILQ_INIT(&sc->sc_cmd_waiting);
+
+	for (i = 0; i < OTUS_CMD_LIST_COUNT; i++)
+		STAILQ_INSERT_HEAD(&sc->sc_cmd_inactive, &sc->sc_cmd[i],
+		    next_cmd);
 
 	return (0);
 }
 
 static void
-otus_free_tx_cmd(struct otus_softc *sc)
+otus_free_tx_cmd_list(struct otus_softc *sc)
 {
+
+	/*
+	 * XXX TODO: something needs to wake up any pending/sleeping
+	 * waiters!
+	 */
+	STAILQ_INIT(&sc->sc_cmd_active);
+	STAILQ_INIT(&sc->sc_cmd_inactive);
+	STAILQ_INIT(&sc->sc_cmd_pending);
+	STAILQ_INIT(&sc->sc_cmd_waiting);
+
+	otus_free_cmd_list(sc, sc->sc_cmd, OTUS_CMD_LIST_COUNT);
 }
 
 static int
@@ -835,7 +906,7 @@ fail:
 static int
 otus_alloc_rx_list(struct otus_softc *sc)
 {
-        int error, i;
+	int error, i;
 
 	error = otus_alloc_list(sc, sc->sc_rx, OTUS_RX_LIST_COUNT,
 	    OTUS_RXBUFSZ);
@@ -956,6 +1027,42 @@ otus_freebuf(struct otus_softc *sc, struct otus_data *bf)
 	STAILQ_INSERT_TAIL(&sc->sc_tx_inactive, bf, next);
 }
 
+static struct otus_tx_cmd *
+_otus_get_txcmd(struct otus_softc *sc)
+{
+	struct otus_tx_cmd *bf;
+
+	bf = STAILQ_FIRST(&sc->sc_cmd_inactive);
+	if (bf != NULL)
+		STAILQ_REMOVE_HEAD(&sc->sc_cmd_inactive, next_cmd);
+	else
+		bf = NULL;
+	return (bf);
+}
+
+static struct otus_tx_cmd *
+otus_get_txcmd(struct otus_softc *sc)
+{
+	struct otus_tx_cmd *bf;
+
+	OTUS_LOCK_ASSERT(sc);
+
+	bf = _otus_get_txcmd(sc);
+	if (bf == NULL) {
+		device_printf(sc->sc_dev, "%s: no tx cmd buffers\n",
+		    __func__);
+	}
+	return (bf);
+}
+
+static void
+otus_free_txcmd(struct otus_softc *sc, struct otus_tx_cmd *bf)
+{
+
+	OTUS_LOCK_ASSERT(sc);
+	STAILQ_INSERT_TAIL(&sc->sc_cmd_inactive, bf, next_cmd);
+}
+
 void
 otus_next_scan(void *arg, int pending)
 {
@@ -1027,23 +1134,19 @@ int
 otus_cmd(struct otus_softc *sc, uint8_t code, const void *idata, int ilen,
     void *odata)
 {
-	struct otus_data *cmd;
+	struct otus_tx_cmd *cmd;
 	struct ar_cmd_hdr *hdr;
 #if 0
 	int s, xferlen, error;
 #endif
 	int xferlen;
-	uint8_t which = OTUS_BULK_CMD;
 
 	OTUS_LOCK_ASSERT(sc);
 
 	/* Always bulk-out a multiple of 4 bytes. */
 	xferlen = (sizeof (*hdr) + ilen + 3) & ~3;
 
-	/*
-	 * XXX TODO: have a separate pool for commands; maybe block a while.
-	 */
-	cmd = otus_getbuf(sc);
+	cmd = otus_get_txcmd(sc);
 	if (cmd == NULL) {
 		device_printf(sc->sc_dev, "%s: failed to get buf\n",
 		    __func__);
@@ -1054,6 +1157,7 @@ otus_cmd(struct otus_softc *sc, uint8_t code, const void *idata, int ilen,
 	hdr->code  = code;
 	hdr->len   = ilen;
 	hdr->token = ++sc->token;	/* Don't care about endianness. */
+	/* XXX TODO: check max cmd length? */
 	memcpy((uint8_t *)&hdr[1], idata, ilen);
 
 	device_printf(sc->sc_dev,
@@ -1064,8 +1168,8 @@ otus_cmd(struct otus_softc *sc, uint8_t code, const void *idata, int ilen,
 	cmd->done = 0;
 
 	/* Queue the command to the endpoint */
-	STAILQ_INSERT_TAIL(&sc->sc_tx_pending[which], cmd, next);
-	usbd_transfer_start(sc->sc_xfer[which]);
+	STAILQ_INSERT_TAIL(&sc->sc_cmd_pending, cmd, next_cmd);
+	usbd_transfer_start(sc->sc_xfer[OTUS_BULK_CMD]);
 
 	/*
 	 * XXX TODO: since we hold the lock, are we still guaranteed
@@ -1115,6 +1219,8 @@ int
 otus_write_barrier(struct otus_softc *sc)
 {
 	int error;
+
+	OTUS_LOCK_ASSERT(sc);
 
 	if (sc->write_idx == 0)
 		return 0;	/* Nothing to flush. */
@@ -1579,7 +1685,7 @@ otus_txeof(struct usb_xfer *xfer, struct otus_data *data)
 }
 
 static void
-otus_txcmdeof(struct usb_xfer *xfer, struct otus_data *data)
+otus_txcmdeof(struct usb_xfer *xfer, struct otus_tx_cmd *cmd)
 {
 	struct otus_softc *sc = usbd_xfer_softc(xfer);
 
@@ -1597,8 +1703,8 @@ otus_txcmdeof(struct usb_xfer *xfer, struct otus_data *data)
 	 * Note note: make sure we don't free buffers being
 	 * waited on from underneath the waiter.  Ugh.
 	 */
-	device_printf(sc->sc_dev, "%s: called; data=%p\n", __func__, data);
-	otus_freebuf(sc, data);
+	device_printf(sc->sc_dev, "%s: called; data=%p\n", __func__, cmd);
+	otus_free_txcmd(sc, cmd);
 }
 
 static void
@@ -1661,41 +1767,40 @@ otus_bulk_cmd_callback(struct usb_xfer *xfer, usb_error_t error)
 #if 0
 	struct ieee80211com *ic = &sc->sc_ic;
 #endif
-	struct otus_data *data;
-	uint8_t which = OTUS_BULK_CMD;
+	struct otus_tx_cmd *cmd;
 
 	OTUS_LOCK_ASSERT(sc);
 
 	switch (USB_GET_STATE(xfer)) {
 	case USB_ST_TRANSFERRED:
-		data = STAILQ_FIRST(&sc->sc_tx_active[which]);
-		if (data == NULL)
+		cmd = STAILQ_FIRST(&sc->sc_cmd_active);
+		if (cmd == NULL)
 			goto tr_setup;
 		OTUS_DPRINTF(sc, OTUS_DEBUG_CMDDONE,
-		    "%s: transfer done %p\n", __func__, data);
-		STAILQ_REMOVE_HEAD(&sc->sc_tx_active[which], next);
-		otus_txcmdeof(xfer, data);
+		    "%s: transfer done %p\n", __func__, cmd);
+		STAILQ_REMOVE_HEAD(&sc->sc_cmd_active, next_cmd);
+		otus_txcmdeof(xfer, cmd);
 		/* FALLTHROUGH */
 	case USB_ST_SETUP:
 tr_setup:
-		data = STAILQ_FIRST(&sc->sc_tx_pending[which]);
-		if (data == NULL) {
+		cmd = STAILQ_FIRST(&sc->sc_cmd_pending);
+		if (cmd == NULL) {
 			OTUS_DPRINTF(sc, OTUS_DEBUG_CMD,
 			    "%s: empty pending queue sc %p\n", __func__, sc);
 			return;
 		}
-		STAILQ_REMOVE_HEAD(&sc->sc_tx_pending[which], next);
-		STAILQ_INSERT_TAIL(&sc->sc_tx_active[which], data, next);
-		usbd_xfer_set_frame_data(xfer, 0, data->buf, data->buflen);
+		STAILQ_REMOVE_HEAD(&sc->sc_cmd_pending, next_cmd);
+		STAILQ_INSERT_TAIL(&sc->sc_cmd_active, cmd, next_cmd);
+		usbd_xfer_set_frame_data(xfer, 0, cmd->buf, cmd->buflen);
 		OTUS_DPRINTF(sc, OTUS_DEBUG_CMD,
-		    "%s: submitting transfer %p\n", __func__, data);
+		    "%s: submitting transfer %p\n", __func__, cmd);
 		usbd_transfer_submit(xfer);
 		break;
 	default:
-		data = STAILQ_FIRST(&sc->sc_tx_active[which]);
-		if (data != NULL) {
-			STAILQ_REMOVE_HEAD(&sc->sc_tx_active[which], next);
-			otus_txcmdeof(xfer, data);
+		cmd = STAILQ_FIRST(&sc->sc_cmd_active);
+		if (cmd != NULL) {
+			STAILQ_REMOVE_HEAD(&sc->sc_cmd_active, next_cmd);
+			otus_txcmdeof(xfer, cmd);
 		}
 
 		if (error != USB_ERR_CANCELLED) {
