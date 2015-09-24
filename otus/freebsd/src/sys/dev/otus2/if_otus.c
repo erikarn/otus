@@ -64,12 +64,26 @@
 
 #include "if_otusreg.h"
 
-#ifdef USB_DEBUG
 int otus_debug = 0xffffffff;
 static SYSCTL_NODE(_hw_usb, OID_AUTO, otus, CTLFLAG_RW, 0, "USB otus");
 SYSCTL_INT(_hw_usb_otus, OID_AUTO, debug, CTLFLAG_RWTUN, &otus_debug, 0,
     "Debug level");
-#endif
+#define	OTUS_DEBUG_XMIT		0x00000001
+#define	OTUS_DEBUG_RECV		0x00000002
+#define	OTUS_DEBUG_TXDONE	0x00000004
+#define	OTUS_DEBUG_RXDONE	0x00000008
+#define	OTUS_DEBUG_CMD		0x00000010
+#define	OTUS_DEBUG_CMDDONE	0x00000020
+#define	OTUS_DEBUG_RESET	0x00000040
+#define	OTUS_DEBUG_STATE	0x00000080
+#define	OTUS_DEBUG_CMDNOTIFY	0x00000100
+#define	OTUS_DEBUG_ANY		0xffffffff
+
+#define	OTUS_DPRINTF(sc, dm, ...) \
+	do { \
+		if ((dm == OTUS_DEBUG_ANY) || (dm & otus_debug)) \
+			device_printf(sc->sc_dev, __VA_ARGS__); \
+	} while (0)
 
 #define	OTUS_DEV(v, p) { USB_VPI(v, p, 0) }
 static const STRUCT_USB_HOST_ID otus_devs[] = {
@@ -658,7 +672,7 @@ otus_get_chanlist(struct otus_softc *sc)
 
 	/* XXX regulatory domain. */
 	domain = le16toh(sc->eeprom.baseEepHeader.regDmn[0]);
-	DPRINTF("regdomain=0x%04x\n", domain);
+	OTUS_DPRINTF(sc, OTUS_DEBUG_RESET, "regdomain=0x%04x\n", domain);
 
 	if (sc->eeprom.baseEepHeader.opCapFlags & AR5416_OPFLAGS_11G) {
 		for (i = 0; i < 14; i++) {
@@ -689,6 +703,8 @@ otus_load_firmware(struct otus_softc *sc, const char *name, uint32_t addr)
 	int mlen, error, size;
 
 	error = 0;
+
+	device_printf(sc->sc_dev, "%s: loading firmware (%s)\n", __func__, name);
 
 	/* Read firmware image from the filesystem. */
 	if ((fw = firmware_get(name)) == NULL) {
@@ -724,6 +740,7 @@ otus_load_firmware(struct otus_softc *sc, const char *name, uint32_t addr)
 	OTUS_UNLOCK(sc);
 
 	firmware_put(fw, FIRMWARE_UNLOAD);
+	device_printf(sc->sc_dev, "%s: %s: error=%d\n", __func__, name, error);
 	return error;
 }
 
@@ -935,7 +952,8 @@ otus_getbuf(struct otus_softc *sc)
 
 	bf = _otus_getbuf(sc);
 	if (bf == NULL) {
-		DPRINTF("%s: no buffers\n", __func__);
+		OTUS_DPRINTF(sc, OTUS_DEBUG_ANY,
+		    "%s: no buffers\n", __func__);
 	}
 	return (bf);
 }
@@ -976,7 +994,7 @@ otus_newstate(struct ieee80211vap *vap, enum ieee80211_state nstate, int arg)
 	enum ieee80211_state ostate;
 
 	ostate = vap->iv_state;
-	DPRINTF("%s: %s -> %s\n", __func__,
+	OTUS_DPRINTF(sc, OTUS_DEBUG_STATE, "%s: %s -> %s\n", __func__,
 	    ieee80211_state_name[ostate],
 	    ieee80211_state_name[nstate]);
 
@@ -1057,6 +1075,9 @@ otus_cmd(struct otus_softc *sc, uint8_t code, const void *idata, int ilen,
 
 	/* Queue the command to the endpoint */
 	usbd_transfer_start(sc->sc_xfer[which]);
+
+	/* XXX just sleep for now, see if things happen */
+	msleep(cmd, &sc->sc_mtx, PCATCH, "otuscmd", hz);
 
 #if 0
 	/* Wait for response if required */
@@ -1167,15 +1188,13 @@ otus_read_eeprom(struct otus_softc *sc)
 void
 otus_newassoc(struct ieee80211com *ic, struct ieee80211_node *ni, int isnew)
 {
-#if 0
 	struct otus_softc *sc = ic->ic_softc;
-#endif
 	struct otus_node *on = OTUS_NODE(ni);
 	struct ieee80211_rateset *rs = &ni->ni_rates;
 	uint8_t rate;
 	int ridx, i;
 
-	DPRINTF("new assoc isnew=%d addr=%s\n",
+	OTUS_DPRINTF(sc, OTUS_DEBUG_STATE, "new assoc isnew=%d addr=%s\n",
 	    isnew, ether_sprintf(ni->ni_macaddr));
 
 #if 0
@@ -1191,7 +1210,7 @@ otus_newassoc(struct ieee80211com *ic, struct ieee80211_node *ni, int isnew)
 			if (otus_rates[ridx].rate == rate)
 				break;
 		on->ridx[i] = ridx;
-		DPRINTF("rate=0x%02x ridx=%d\n",
+		OTUS_DPRINTF(sc, OTUS_DEBUG_RESET, "rate=0x%02x ridx=%d\n",
 		    rs->rs_rates[i], on->ridx[i]);
 	}
 }
@@ -1208,13 +1227,15 @@ otus_cmd_rxeof(struct otus_softc *sc, uint8_t *buf, int len)
 	OTUS_LOCK_ASSERT(sc);
 
 	if (__predict_false(len < sizeof (*hdr))) {
-		DPRINTF("cmd too small %d\n", len);
+		OTUS_DPRINTF(sc, OTUS_DEBUG_CMDDONE,
+		    "cmd too small %d\n", len);
 		return;
 	}
 	hdr = (struct ar_cmd_hdr *)buf;
 	if (__predict_false(sizeof (*hdr) + hdr->len > len ||
 	    sizeof (*hdr) + hdr->len > 64)) {
-		DPRINTF("cmd too large %d\n", hdr->len);
+		OTUS_DPRINTF(sc, OTUS_DEBUG_CMDDONE,
+		    "cmd too large %d\n", hdr->len);
 		return;
 	}
 
@@ -1256,7 +1277,8 @@ otus_cmd_rxeof(struct otus_softc *sc, uint8_t *buf, int len)
 		struct otus_node *on;
 #endif
 
-		DPRINTF("tx completed %s status=%d phy=0x%x\n",
+		OTUS_DPRINTF(sc, OTUS_DEBUG_CMDNOTIFY,
+		    "tx completed %s status=%d phy=0x%x\n",
 		    ether_sprintf(tx->macaddr), le16toh(tx->status),
 		    le32toh(tx->phy));
 #if 0
@@ -1302,7 +1324,8 @@ otus_sub_rxeof(struct otus_softc *sc, uint8_t *buf, int len, struct mbufq *rxq)
 	int mlen;
 
 	if (__predict_false(len < AR_PLCP_HDR_LEN)) {
-		DPRINTF("sub-xfer too short %d\n", len);
+		OTUS_DPRINTF(sc, OTUS_DEBUG_RXDONE,
+		    "sub-xfer too short %d\n", len);
 		return;
 	}
 	plcp = buf;
@@ -1316,7 +1339,7 @@ otus_sub_rxeof(struct otus_softc *sc, uint8_t *buf, int len, struct mbufq *rxq)
 
 	/* Received MPDU. */
 	if (__predict_false(len < AR_PLCP_HDR_LEN + sizeof (*tail))) {
-		DPRINTF("MPDU too short %d\n", len);
+		OTUS_DPRINTF(sc, OTUS_DEBUG_RXDONE, "MPDU too short %d\n", len);
 		counter_u64_add(ic->ic_ierrors, 1);
 		return;
 	}
@@ -1324,9 +1347,9 @@ otus_sub_rxeof(struct otus_softc *sc, uint8_t *buf, int len, struct mbufq *rxq)
 
 	/* Discard error frames. */
 	if (__predict_false(tail->error != 0)) {
-		DPRINTF("error frame 0x%02x\n", tail->error);
+		OTUS_DPRINTF(sc, OTUS_DEBUG_RXDONE, "error frame 0x%02x\n", tail->error);
 		if (tail->error & AR_RX_ERROR_FCS) {
-			DPRINTF("bad FCS\n");
+			OTUS_DPRINTF(sc, OTUS_DEBUG_RXDONE, "bad FCS\n");
 		} else if (tail->error & AR_RX_ERROR_MMIC) {
 			/* Report Michael MIC failures to net80211. */
 #if 0
@@ -1434,12 +1457,14 @@ otus_rxeof(struct usb_xfer *xfer, struct otus_data *data, struct mbufq *rxq)
 	while (len >= sizeof (*head)) {
 		head = (struct ar_rx_head *)buf;
 		if (__predict_false(head->tag != htole16(AR_RX_HEAD_TAG))) {
-			DPRINTF("tag not valid 0x%x\n", le16toh(head->tag));
+			OTUS_DPRINTF(sc, OTUS_DEBUG_RXDONE,
+			    "tag not valid 0x%x\n", le16toh(head->tag));
 			break;
 		}
 		hlen = le16toh(head->len);
 		if (__predict_false(sizeof (*head) + hlen > len)) {
-			DPRINTF("xfer too short %d/%d\n", len, hlen);
+			OTUS_DPRINTF(sc, OTUS_DEBUG_RXDONE,
+			    "xfer too short %d/%d\n", len, hlen);
 			break;
 		}
 		/* Process sub-xfer. */
@@ -1535,7 +1560,8 @@ otus_txeof(struct usb_xfer *xfer, struct otus_data *data)
 {
 	struct otus_softc *sc = usbd_xfer_softc(xfer);
 
-	DPRINTF("%s: called; data=%p\n", __func__, data);
+	OTUS_DPRINTF(sc, OTUS_DEBUG_TXDONE,
+	    "%s: called; data=%p\n", __func__, data);
 
 	OTUS_LOCK_ASSERT(sc);
 
@@ -1586,7 +1612,8 @@ otus_bulk_tx_callback(struct usb_xfer *xfer, usb_error_t error)
 		data = STAILQ_FIRST(&sc->sc_tx_active[which]);
 		if (data == NULL)
 			goto tr_setup;
-		DPRINTF("%s: transfer done %p\n", __func__, data);
+		OTUS_DPRINTF(sc, OTUS_DEBUG_TXDONE,
+		    "%s: transfer done %p\n", __func__, data);
 		STAILQ_REMOVE_HEAD(&sc->sc_tx_active[which], next);
 		otus_txeof(xfer, data);
 		otus_freebuf(sc, data);
@@ -1595,13 +1622,15 @@ otus_bulk_tx_callback(struct usb_xfer *xfer, usb_error_t error)
 tr_setup:
 		data = STAILQ_FIRST(&sc->sc_tx_pending[which]);
 		if (data == NULL) {
-			DPRINTF("%s: empty pending queue sc %p\n", __func__, sc);
+			OTUS_DPRINTF(sc, OTUS_DEBUG_XMIT,
+			    "%s: empty pending queue sc %p\n", __func__, sc);
 			return;
 		}
 		STAILQ_REMOVE_HEAD(&sc->sc_tx_pending[which], next);
 		STAILQ_INSERT_TAIL(&sc->sc_tx_active[which], data, next);
 		usbd_xfer_set_frame_data(xfer, 0, data->buf, data->buflen);
-		DPRINTF("%s: submitting transfer %p\n", __func__, data);
+		OTUS_DPRINTF(sc, OTUS_DEBUG_XMIT,
+		    "%s: submitting transfer %p\n", __func__, data);
 		usbd_transfer_submit(xfer);
 		break;
 	default:
@@ -1638,7 +1667,8 @@ otus_bulk_cmd_callback(struct usb_xfer *xfer, usb_error_t error)
 		data = STAILQ_FIRST(&sc->sc_tx_active[which]);
 		if (data == NULL)
 			goto tr_setup;
-		DPRINTF("%s: transfer done %p\n", __func__, data);
+		OTUS_DPRINTF(sc, OTUS_DEBUG_CMDDONE,
+		    "%s: transfer done %p\n", __func__, data);
 		STAILQ_REMOVE_HEAD(&sc->sc_tx_active[which], next);
 		otus_txcmdeof(xfer, data);
 		/* FALLTHROUGH */
@@ -1646,13 +1676,15 @@ otus_bulk_cmd_callback(struct usb_xfer *xfer, usb_error_t error)
 tr_setup:
 		data = STAILQ_FIRST(&sc->sc_tx_pending[which]);
 		if (data == NULL) {
-			DPRINTF("%s: empty pending queue sc %p\n", __func__, sc);
+			OTUS_DPRINTF(sc, OTUS_DEBUG_CMD,
+			    "%s: empty pending queue sc %p\n", __func__, sc);
 			return;
 		}
 		STAILQ_REMOVE_HEAD(&sc->sc_tx_pending[which], next);
 		STAILQ_INSERT_TAIL(&sc->sc_tx_active[which], data, next);
 		usbd_xfer_set_frame_data(xfer, 0, data->buf, data->buflen);
-		DPRINTF("%s: submitting transfer %p\n", __func__, data);
+		OTUS_DPRINTF(sc, OTUS_DEBUG_CMD,
+		    "%s: submitting transfer %p\n", __func__, data);
 		usbd_transfer_submit(xfer);
 		break;
 	default:
@@ -1682,7 +1714,8 @@ otus_bulk_irq_callback(struct usb_xfer *xfer, usb_error_t error)
 	int sumlen;
 
 	usbd_xfer_status(xfer, &actlen, &sumlen, NULL, NULL);
-	DPRINTF( "%s: called; state=%d\n", __func__, USB_GET_STATE(xfer));
+	OTUS_DPRINTF(sc, OTUS_DEBUG_ANY,
+	    "%s: called; state=%d\n", __func__, USB_GET_STATE(xfer));
 
 	switch (USB_GET_STATE(xfer)) {
 	case USB_ST_TRANSFERRED:
@@ -1691,7 +1724,8 @@ otus_bulk_irq_callback(struct usb_xfer *xfer, usb_error_t error)
 		 * "actlen" has the total length for all frames
 		 * transferred.
 		 */
-		DPRINTF("%s: comp; %d bytes\n",
+		OTUS_DPRINTF(sc, OTUS_DEBUG_ANY,
+		    "%s: comp; %d bytes\n",
 		    __func__,
 		    actlen);
 #if 0
@@ -1703,7 +1737,7 @@ otus_bulk_irq_callback(struct usb_xfer *xfer, usb_error_t error)
 		/*
 		 * Setup xfer frame lengths/count and data
 		 */
-		DPRINTF("%s: setup\n", __func__);
+		OTUS_DPRINTF(sc, OTUS_DEBUG_ANY, "%s: setup\n", __func__);
 		usbd_xfer_set_frame_len(xfer, 0, usbd_xfer_max_len(xfer));
 		usbd_transfer_submit(xfer);
 		break;
@@ -2258,7 +2292,8 @@ otus_set_chan(struct otus_softc *sc, struct ieee80211_channel *c, int assoc)
 	int error, chan, i;
 
 	chan = ieee80211_chan2ieee(ic, c);
-	DPRINTF("setting channel %d (%dMHz)\n", chan, c->ic_freq);
+	OTUS_DPRINTF(sc, OTUS_DEBUG_RESET,
+	    "setting channel %d (%dMHz)\n", chan, c->ic_freq);
 
 	tmp = IEEE80211_IS_CHAN_2GHZ(c) ? 0x105 : 0x104;
 	otus_write(sc, AR_MAC_REG_DYNAMIC_SIFS_ACK, tmp);
@@ -2277,7 +2312,7 @@ otus_set_chan(struct otus_softc *sc, struct ieee80211_channel *c, int assoc)
 
 	/* Reprogram PHY and RF on channel band or bandwidth changes. */
 	if (sc->bb_reset || c->ic_flags != sc->sc_curchan->ic_flags) {
-		DPRINTF("band switch\n");
+		OTUS_DPRINTF(sc, OTUS_DEBUG_RESET, "band switch\n");
 
 		/* Cold/Warm reset BB/ADDA. */
 		otus_write(sc, 0x1d4004, sc->bb_reset ? 0x800 : 0x400);
@@ -2330,21 +2365,25 @@ otus_set_chan(struct otus_softc *sc, struct ieee80211_channel *c, int assoc)
 	otus_get_delta_slope(coeff, &exp, &man);
 	cmd.dsc_exp = htole32(exp);
 	cmd.dsc_man = htole32(man);
-	DPRINTF("ds coeff=%u exp=%u man=%u\n", coeff, exp, man);
+	OTUS_DPRINTF(sc, OTUS_DEBUG_RESET,
+	    "ds coeff=%u exp=%u man=%u\n", coeff, exp, man);
 	/* For Short GI, coeff is 9/10 that of normal coeff. */
 	coeff = (9 * coeff) / 10;
 	otus_get_delta_slope(coeff, &exp, &man);
 	cmd.dsc_shgi_exp = htole32(exp);
 	cmd.dsc_shgi_man = htole32(man);
-	DPRINTF("ds shgi coeff=%u exp=%u man=%u\n", coeff, exp, man);
+	OTUS_DPRINTF(sc, OTUS_DEBUG_RESET,
+	    "ds shgi coeff=%u exp=%u man=%u\n", coeff, exp, man);
 	/* Set wait time for AGC and noise calibration (100 or 200ms). */
 	cmd.check_loop_count = assoc ? htole32(2000) : htole32(1000);
-	DPRINTF("%s\n", (code == AR_CMD_RF_INIT) ? "RF_INIT" : "FREQUENCY");
+	OTUS_DPRINTF(sc, OTUS_DEBUG_RESET,
+	    "%s\n", (code == AR_CMD_RF_INIT) ? "RF_INIT" : "FREQUENCY");
 	error = otus_cmd(sc, code, &cmd, sizeof cmd, &rsp);
 	if (error != 0)
 		return error;
 	if ((rsp.status & htole32(AR_CAL_ERR_AGC | AR_CAL_ERR_NF_VAL)) != 0) {
-		DPRINTF("status=0x%x\n", le32toh(rsp.status));
+		OTUS_DPRINTF(sc, OTUS_DEBUG_RESET,
+		    "status=0x%x\n", le32toh(rsp.status));
 		/* Force cold reset on next channel. */
 		sc->bb_reset = 1;
 	}
