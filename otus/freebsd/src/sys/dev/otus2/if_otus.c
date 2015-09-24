@@ -1159,7 +1159,7 @@ otus_cmd(struct otus_softc *sc, uint8_t code, const void *idata, int ilen,
 	/* XXX TODO: check max cmd length? */
 	memcpy((uint8_t *)&hdr[1], idata, ilen);
 
-	device_printf(sc->sc_dev,
+	OTUS_DPRINTF(sc, OTUS_DEBUG_CMD,
 	    "%s: sending command code=0x%02x len=%d token=%d\n",
 	    __func__, code, ilen, hdr->token);
 
@@ -1306,7 +1306,7 @@ otus_cmd_handle_response(struct otus_softc *sc, struct ar_cmd_hdr *hdr)
 
 	OTUS_LOCK_ASSERT(sc);
 
-	device_printf(sc->sc_dev,
+	OTUS_DPRINTF(sc, OTUS_DEBUG_CMDDONE,
 	    "%s: received reply code=0x%02x len=%d token=%d\n",
 	    __func__,
 	    hdr->code, hdr->len, hdr->token);
@@ -1352,7 +1352,8 @@ otus_cmd_rxeof(struct otus_softc *sc, uint8_t *buf, int len)
 		return;
 	}
 
-	device_printf(sc->sc_dev, "%s: code=%.02x\n",
+	OTUS_DPRINTF(sc, OTUS_DEBUG_RXDONE,
+	    "%s: code=%.02x\n",
 	    __func__,
 	    hdr->code);
 
@@ -1381,7 +1382,7 @@ otus_cmd_rxeof(struct otus_softc *sc, uint8_t *buf, int len)
 		struct otus_node *on;
 #endif
 
-		OTUS_DPRINTF(sc, OTUS_DEBUG_CMDNOTIFY,
+		OTUS_DPRINTF(sc, OTUS_DEBUG_TXDONE,
 		    "tx completed %s status=%d phy=0x%x\n",
 		    ether_sprintf(tx->macaddr), le16toh(tx->status),
 		    le32toh(tx->phy));
@@ -1596,14 +1597,15 @@ otus_bulk_rx_callback(struct usb_xfer *xfer, usb_error_t error)
 
 	mbufq_init(&scrx, 1024);
 
+#if 0
 	device_printf(sc->sc_dev, "%s: called; state=%d; error=%d\n",
 	    __func__,
 	    USB_GET_STATE(xfer),
 	    error);
+#endif
 
 	switch (USB_GET_STATE(xfer)) {
 	case USB_ST_TRANSFERRED:
-		device_printf(sc->sc_dev, "%s: called; TRANSFERRED\n", __func__);
 		data = STAILQ_FIRST(&sc->sc_rx_active);
 		if (data == NULL)
 			goto tr_setup;
@@ -1613,7 +1615,6 @@ otus_bulk_rx_callback(struct usb_xfer *xfer, usb_error_t error)
 		/* FALLTHROUGH */
 	case USB_ST_SETUP:
 tr_setup:
-		device_printf(sc->sc_dev, "%s: called; SETUP\n", __func__);
 		/*
 		 * XXX TODO: what if sc_rx isn't empty, but data
 		 * is empty?  Then we leak mbufs.
@@ -1625,8 +1626,6 @@ tr_setup:
 		}
 		STAILQ_REMOVE_HEAD(&sc->sc_rx_inactive, next);
 		STAILQ_INSERT_TAIL(&sc->sc_rx_active, data, next);
-		device_printf(sc->sc_dev, "%s: buf=%p, len=%d\n",
-		    __func__, data->buf, usbd_xfer_max_len(xfer));
 		usbd_xfer_set_frame_data(xfer, 0, data->buf,
 		    usbd_xfer_max_len(xfer));
 		usbd_transfer_submit(xfer);
@@ -1694,7 +1693,8 @@ otus_txcmdeof(struct usb_xfer *xfer, struct otus_tx_cmd *cmd)
 
 	OTUS_LOCK_ASSERT(sc);
 
-	device_printf(sc->sc_dev, "%s: called; data=%p; odata=%p\n",
+	OTUS_DPRINTF(sc, OTUS_DEBUG_CMDDONE,
+	    "%s: called; data=%p; odata=%p\n",
 	    __func__, cmd, cmd->odata);
 
 	/*
