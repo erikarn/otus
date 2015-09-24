@@ -753,6 +753,8 @@ otus_open_pipes(struct otus_softc *sc)
 #endif
 	int error;
 
+	OTUS_UNLOCK_ASSERT(sc);
+
 	if ((error = otus_alloc_tx_cmd(sc)) != 0) {
 		device_printf(sc->sc_dev,
 		    "%s: could not allocate command xfer\n",
@@ -772,22 +774,10 @@ otus_open_pipes(struct otus_softc *sc)
 		goto fail;
 	}
 
-	/* XXX TODO - setup RX transfers? */
-#if 0
-	for (i = 0; i < OTUS_RX_DATA_LIST_COUNT; i++) {
-		struct otus_rx_data *data = &sc->rx_data[i];
-
-		usbd_setup_xfer(data->xfer, sc->data_rx_pipe, data, data->buf,
-		    OTUS_RXBUFSZ, USBD_SHORT_XFER_OK | USBD_NO_COPY,
-		    USBD_NO_TIMEOUT, otus_rxeof);
-		error = usbd_transfer(data->xfer);
-		if (error != USBD_IN_PROGRESS && error != 0) {
-			printf("%s: could not queue Rx xfer\n",
-			    sc->sc_dev.dv_xname);
-			goto fail;
-		}
-	}
-#endif
+	/* Enable RX transfers; needed for initial firmware messages */
+	OTUS_LOCK(sc);
+	usbd_transfer_start(sc->sc_xfer[OTUS_BULK_RX]);
+	OTUS_UNLOCK(sc);
 	return 0;
 
 fail:	otus_close_pipes(sc);
@@ -1074,7 +1064,13 @@ otus_cmd(struct otus_softc *sc, uint8_t code, const void *idata, int ilen,
 	cmd->done = 0;
 
 	/* Queue the command to the endpoint */
+	STAILQ_INSERT_TAIL(&sc->sc_tx_pending[which], cmd, next);
 	usbd_transfer_start(sc->sc_xfer[which]);
+
+	/*
+	 * XXX TODO: since we hold the lock, are we still guaranteed
+	 * to own the buffer?
+	 */
 
 	/* XXX just sleep for now, see if things happen */
 	msleep(cmd, &sc->sc_mtx, PCATCH, "otuscmd", hz);
@@ -1238,6 +1234,10 @@ otus_cmd_rxeof(struct otus_softc *sc, uint8_t *buf, int len)
 		    "cmd too large %d\n", hdr->len);
 		return;
 	}
+
+	device_printf(sc->sc_dev, "%s: code=%.02x\n",
+	    __func__,
+	    hdr->code);
 
 	/*
 	 * XXX TODO: has to reach into the cmd queue "waiting for
@@ -1491,6 +1491,10 @@ otus_bulk_rx_callback(struct usb_xfer *xfer, usb_error_t error)
 	OTUS_LOCK_ASSERT(sc);
 
 	mbufq_init(&scrx, 1024);
+
+	device_printf(sc->sc_dev, "%s: called; state=%d\n",
+	    __func__,
+	    USB_GET_STATE(xfer));
 
 	switch (USB_GET_STATE(xfer)) {
 	case USB_ST_TRANSFERRED:
