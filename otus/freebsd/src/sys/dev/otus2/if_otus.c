@@ -1718,15 +1718,14 @@ otus_txcmdeof(struct usb_xfer *xfer, struct otus_tx_cmd *cmd)
 	    __func__, cmd, cmd->odata);
 
 	/*
-	 * XXX TODO:
-	 *
-	 * If we're not waiting for a response then place
-	 * it on the free list; else place it on the waiting
-	 * list.
+	 * Non-response commands still need wakeup so the caller
+	 * knows it was submitted and completed OK; response commands should
+	 * wait until they're ACKed by the firmware with a response.
 	 */
 	if (cmd->odata) {
 		STAILQ_INSERT_TAIL(&sc->sc_cmd_waiting, cmd, next_cmd);
 	} else {
+		wakeup(cmd);
 		otus_free_txcmd(sc, cmd);
 	}
 }
