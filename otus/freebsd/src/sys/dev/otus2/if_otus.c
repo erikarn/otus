@@ -322,9 +322,7 @@ otus_detach(device_t self)
 	struct otus_softc *sc = device_get_softc(self);
 	struct ieee80211com *ic = &sc->sc_ic;
 
-	OTUS_LOCK(sc);
 	otus_stop(sc);
-	OTUS_UNLOCK(sc);
 
 	usbd_transfer_unsetup(sc->sc_xfer, OTUS_N_XFER);
 
@@ -405,7 +403,6 @@ otus_parent(struct ieee80211com *ic)
 	struct otus_softc *sc = ic->ic_softc;
 	int startall = 0;
 
-	OTUS_LOCK(sc);
 	if (ic->ic_nrunning > 0) {
 		if (!sc->sc_running) {
 			otus_init(sc);
@@ -413,7 +410,6 @@ otus_parent(struct ieee80211com *ic)
 		}
 	} else if (sc->sc_running)
 		otus_stop(sc);
-	OTUS_UNLOCK(sc);
 
 	if (startall)
 		ieee80211_start_all(ic);
@@ -2745,9 +2741,11 @@ otus_init(struct otus_softc *sc)
 	struct ieee80211com *ic = &sc->sc_ic;
 	int error;
 
-	OTUS_LOCK_ASSERT(sc);
+	OTUS_UNLOCK_ASSERT(sc);
 
+	OTUS_LOCK(sc);
 	if ((error = otus_init_mac(sc)) != 0) {
+		OTUS_UNLOCK(sc);
 		device_printf(sc->sc_dev,
 		    "%s: could not initialize MAC\n", __func__);
 		return error;
@@ -2789,6 +2787,7 @@ otus_init(struct otus_softc *sc)
 	sc->bb_reset = 1;	/* Force cold reset. */
 
 	if ((error = otus_set_chan(sc, ic->ic_curchan, 0)) != 0) {
+		OTUS_UNLOCK(sc);
 		device_printf(sc->sc_dev,
 		    "%s: could not set channel\n", __func__);
 		return error;
@@ -2805,6 +2804,7 @@ otus_init(struct otus_softc *sc)
 		ieee80211_new_state(ic, IEEE80211_S_SCAN, -1);
 #endif
 
+	OTUS_UNLOCK(sc);
 	return 0;
 }
 
@@ -2815,13 +2815,14 @@ otus_stop(struct otus_softc *sc)
 	int s;
 #endif
 
-	OTUS_LOCK_ASSERT(sc);
+	OTUS_UNLOCK_ASSERT(sc);
 
 	sc->sc_tx_timer = 0;
 
 	taskqueue_drain_timeout(taskqueue_thread, &sc->scan_to);
 	taskqueue_drain_timeout(taskqueue_thread, &sc->calib_to);
 
+	OTUS_LOCK(sc);
 	/* Stop Rx. */
 	otus_write(sc, 0x1c3d30, 0);
 	(void)otus_write_barrier(sc);
@@ -2830,4 +2831,6 @@ otus_stop(struct otus_softc *sc)
 	device_printf(sc->sc_dev, "%s: TODO: flush tx/rx queues\n", __func__);
 
 	sc->tx_queued = 0;
+
+	OTUS_UNLOCK(sc);
 }
