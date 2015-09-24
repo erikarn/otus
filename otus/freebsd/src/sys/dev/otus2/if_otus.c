@@ -1595,9 +1595,10 @@ otus_bulk_rx_callback(struct usb_xfer *xfer, usb_error_t error)
 
 	mbufq_init(&scrx, 1024);
 
-	device_printf(sc->sc_dev, "%s: called; state=%d\n",
+	device_printf(sc->sc_dev, "%s: called; state=%d; error=%d\n",
 	    __func__,
-	    USB_GET_STATE(xfer));
+	    USB_GET_STATE(xfer),
+	    error);
 
 	switch (USB_GET_STATE(xfer)) {
 	case USB_ST_TRANSFERRED:
