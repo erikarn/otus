@@ -588,7 +588,7 @@ otus_attachhook(struct otus_softc *sc)
 	    ether_sprintf(ic->ic_macaddr));
 
 	ic->ic_softc = sc;
-	ic->ic_name = device_get_nameunit(sc);
+	ic->ic_name = device_get_nameunit(sc->sc_dev);
 	ic->ic_phytype = IEEE80211_T_OFDM;	/* not only, but not used */
 	ic->ic_opmode = IEEE80211_M_STA;	/* default to BSS mode */
 
