@@ -875,7 +875,6 @@ struct otus_tx_cmd {
 	uint16_t		buflen;
 	void *			*odata;
 	uint16_t		token;
-	uint8_t			done;
 	STAILQ_ENTRY(otus_tx_cmd)	next_cmd;
 };
 
