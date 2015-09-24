@@ -77,6 +77,7 @@ SYSCTL_INT(_hw_usb_otus, OID_AUTO, debug, CTLFLAG_RWTUN, &otus_debug, 0,
 #define	OTUS_DEBUG_RESET	0x00000040
 #define	OTUS_DEBUG_STATE	0x00000080
 #define	OTUS_DEBUG_CMDNOTIFY	0x00000100
+#define	OTUS_DEBUG_REGIO	0x00000200
 #define	OTUS_DEBUG_ANY		0xffffffff
 
 #define	OTUS_DPRINTF(sc, dm, ...) \
@@ -460,7 +461,10 @@ otus_set_channel(struct ieee80211com *ic)
 	device_printf(sc->sc_dev, "%s: set channel: %d\n",
 	    __func__,
 	    ic->ic_curchan->ic_freq);
+
+	OTUS_LOCK(sc);
 	(void) otus_set_chan(sc, ic->ic_curchan, 0);
+	OTUS_UNLOCK(sc);
 }
 
 static int
@@ -1192,6 +1196,9 @@ otus_cmd(struct otus_softc *sc, uint8_t code, const void *idata, int ilen,
 void
 otus_write(struct otus_softc *sc, uint32_t reg, uint32_t val)
 {
+
+	OTUS_LOCK_ASSERT(sc);
+
 	sc->write_buf[sc->write_idx].reg = htole32(reg);
 	sc->write_buf[sc->write_idx].val = htole32(val);
 
@@ -1208,6 +1215,10 @@ otus_write_barrier(struct otus_softc *sc)
 
 	if (sc->write_idx == 0)
 		return 0;	/* Nothing to flush. */
+
+	OTUS_DPRINTF(sc, OTUS_DEBUG_REGIO, "%s: called; %d updates\n",
+	    __func__,
+	    sc->write_idx);
 
 	error = otus_cmd(sc, AR_CMD_WREG, sc->write_buf,
 	    sizeof (sc->write_buf[0]) * sc->write_idx, NULL);
@@ -1256,6 +1267,8 @@ otus_read_eeprom(struct otus_softc *sc)
 	uint32_t regs[8], reg;
 	uint8_t *eep;
 	int i, j, error;
+
+	OTUS_LOCK_ASSERT(sc);
 
 	/* Read EEPROM by blocks of 32 bytes. */
 	eep = (uint8_t *)&sc->eeprom;
@@ -1318,6 +1331,12 @@ otus_cmd_handle_response(struct otus_softc *sc, struct ar_cmd_hdr *hdr)
 	 */
 	while ((cmd = STAILQ_FIRST(&sc->sc_cmd_waiting)) != NULL) {
 		STAILQ_REMOVE_HEAD(&sc->sc_cmd_waiting, next_cmd);
+		OTUS_DPRINTF(sc, OTUS_DEBUG_CMDDONE,
+		    "%s: cmd=%p; hdr.token=%d, cmd.token=%d\n",
+		    __func__,
+		    cmd,
+		    (int) hdr->token,
+		    (int) cmd->token);
 		if (hdr->token == cmd->token) {
 			/* Copy answer into caller's supplied buffer. */
 			if (cmd->odata != NULL)
@@ -2123,6 +2142,8 @@ otus_init_mac(struct otus_softc *sc)
 {
 	int error;
 
+	OTUS_LOCK_ASSERT(sc);
+
 	otus_write(sc, AR_MAC_REG_ACK_EXTENSION, 0x40);
 	otus_write(sc, AR_MAC_REG_RETRY_MAX, 0);
 	otus_write(sc, AR_MAC_REG_SNIFFER, 0x2000000);
@@ -2342,6 +2363,8 @@ otus_set_rf_bank4(struct otus_softc *sc, struct ieee80211_channel *c)
 	uint16_t data;
 	int error;
 
+	OTUS_LOCK_ASSERT(sc);
+
 	d0 = 0;
 	if (IEEE80211_IS_CHAN_5GHZ(c)) {
 		chansel = (c->ic_freq - 4800) / 5;
@@ -2405,24 +2428,26 @@ otus_set_chan(struct otus_softc *sc, struct ieee80211_channel *c, int assoc)
 	uint8_t code;
 	int error, chan, i;
 
+	error = 0;
 	chan = ieee80211_chan2ieee(ic, c);
+
 	OTUS_DPRINTF(sc, OTUS_DEBUG_RESET,
 	    "setting channel %d (%dMHz)\n", chan, c->ic_freq);
 
 	tmp = IEEE80211_IS_CHAN_2GHZ(c) ? 0x105 : 0x104;
 	otus_write(sc, AR_MAC_REG_DYNAMIC_SIFS_ACK, tmp);
 	if ((error = otus_write_barrier(sc)) != 0)
-		return error;
+		goto finish;
 
 	/* Disable BB Heavy Clip. */
 	otus_write(sc, AR_PHY_HEAVY_CLIP_ENABLE, 0x200);
 	if ((error = otus_write_barrier(sc)) != 0)
-		return error;
+		goto finish;
 
 	/* XXX Is that FREQ_START ? */
 	error = otus_cmd(sc, AR_CMD_FREQ_STRAT, NULL, 0, NULL);
 	if (error != 0)
-		return error;
+		goto finish;
 
 	/* Reprogram PHY and RF on channel band or bandwidth changes. */
 	if (sc->bb_reset || c->ic_flags != sc->sc_curchan->ic_flags) {
@@ -2431,17 +2456,17 @@ otus_set_chan(struct otus_softc *sc, struct ieee80211_channel *c, int assoc)
 		/* Cold/Warm reset BB/ADDA. */
 		otus_write(sc, 0x1d4004, sc->bb_reset ? 0x800 : 0x400);
 		if ((error = otus_write_barrier(sc)) != 0)
-			return error;
+			goto finish;
 		otus_write(sc, 0x1d4004, 0);
 		if ((error = otus_write_barrier(sc)) != 0)
-			return error;
+			goto finish;
 		sc->bb_reset = 0;
 
 		if ((error = otus_program_phy(sc, c)) != 0) {
 			device_printf(sc->sc_dev,
 			    "%s: could not program PHY\n",
 			    __func__);
-			return error;
+			goto finish;
 		}
 
 		/* Select RF programming based on band. */
@@ -2455,7 +2480,7 @@ otus_set_chan(struct otus_softc *sc, struct ieee80211_channel *c, int assoc)
 			device_printf(sc->sc_dev,
 			    "%s: could not program RF\n",
 			    __func__);
-			return error;
+			goto finish;
 		}
 		code = AR_CMD_RF_INIT;
 	} else {
@@ -2463,12 +2488,12 @@ otus_set_chan(struct otus_softc *sc, struct ieee80211_channel *c, int assoc)
 	}
 
 	if ((error = otus_set_rf_bank4(sc, c)) != 0)
-		return error;
+		goto finish;
 
 	tmp = (sc->txmask == 0x5) ? 0x340 : 0x240;
 	otus_write(sc, AR_PHY_TURBO, tmp);
 	if ((error = otus_write_barrier(sc)) != 0)
-		return error;
+		goto finish;
 
 	/* Send firmware command to set channel. */
 	cmd.freq = htole32((uint32_t)c->ic_freq * 1000);
@@ -2494,7 +2519,7 @@ otus_set_chan(struct otus_softc *sc, struct ieee80211_channel *c, int assoc)
 	    "%s\n", (code == AR_CMD_RF_INIT) ? "RF_INIT" : "FREQUENCY");
 	error = otus_cmd(sc, code, &cmd, sizeof cmd, &rsp);
 	if (error != 0)
-		return error;
+		goto finish;
 	if ((rsp.status & htole32(AR_CAL_ERR_AGC | AR_CAL_ERR_NF_VAL)) != 0) {
 		OTUS_DPRINTF(sc, OTUS_DEBUG_RESET,
 		    "status=0x%x\n", le32toh(rsp.status));
@@ -2514,7 +2539,8 @@ otus_set_chan(struct otus_softc *sc, struct ieee80211_channel *c, int assoc)
 	}
 #endif
 	sc->sc_curchan = c;
-	return 0;
+finish:
+	return (error);
 }
 
 #ifdef notyet
@@ -2719,6 +2745,8 @@ otus_init(struct otus_softc *sc)
 {
 	struct ieee80211com *ic = &sc->sc_ic;
 	int error;
+
+	OTUS_LOCK_ASSERT(sc);
 
 	if ((error = otus_init_mac(sc)) != 0) {
 		device_printf(sc->sc_dev,
