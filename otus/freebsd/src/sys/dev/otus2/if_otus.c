@@ -64,7 +64,7 @@
 
 #include "if_otusreg.h"
 
-int otus_debug = 0xffffffff;
+static int otus_debug = 0;
 static SYSCTL_NODE(_hw_usb, OID_AUTO, otus, CTLFLAG_RW, 0, "USB otus");
 SYSCTL_INT(_hw_usb_otus, OID_AUTO, debug, CTLFLAG_RWTUN, &otus_debug, 0,
     "Debug level");
@@ -454,7 +454,7 @@ static void
 otus_set_channel(struct ieee80211com *ic)
 {
 	struct otus_softc *sc = ic->ic_softc;
-	device_printf(sc->sc_dev, "%s: set channel: %d\n",
+	OTUS_DPRINTF(sc, OTUS_DEBUG_RESET, "%s: set channel: %d\n",
 	    __func__,
 	    ic->ic_curchan->ic_freq);
 
@@ -483,14 +483,14 @@ static void
 otus_scan_start(struct ieee80211com *ic)
 {
 
-	printf("%s: TODO\n", __func__);
+//	printf("%s: TODO\n", __func__);
 }
 
 static void
 otus_scan_end(struct ieee80211com *ic)
 {
 
-	printf("%s: TODO\n", __func__);
+//	printf("%s: TODO\n", __func__);
 }
 
 static void
