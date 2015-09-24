@@ -781,6 +781,7 @@ otus_open_pipes(struct otus_softc *sc)
 	/* Enable RX transfers; needed for initial firmware messages */
 	OTUS_LOCK(sc);
 	usbd_transfer_start(sc->sc_xfer[OTUS_BULK_RX]);
+	usbd_transfer_start(sc->sc_xfer[OTUS_BULK_IRQ]);
 	OTUS_UNLOCK(sc);
 	return 0;
 
