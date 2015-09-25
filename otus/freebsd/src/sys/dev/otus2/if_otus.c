@@ -1395,24 +1395,15 @@ otus_newassoc(struct ieee80211_node *ni, int isnew)
 	struct ieee80211com *ic = ni->ni_ic;
 	struct otus_softc *sc = ic->ic_softc;
 	struct otus_node *on = OTUS_NODE(ni);
-	struct ieee80211_rateset *rs = &ni->ni_rates;
-	uint8_t rate;
-	int ridx, i;
 
 	OTUS_DPRINTF(sc, OTUS_DEBUG_STATE, "new assoc isnew=%d addr=%s\n",
 	    isnew, ether_sprintf(ni->ni_macaddr));
 
-	for (i = 0; i < rs->rs_nrates; i++) {
-		rate = rs->rs_rates[i] & IEEE80211_RATE_VAL;
-		/* Convert 802.11 rate to hardware rate index. */
-		for (ridx = 0; ridx <= OTUS_RIDX_MAX; ridx++)
-			if (otus_rates[ridx].rate == rate)
-				break;
-		on->ridx[i] = ridx;
-		OTUS_DPRINTF(sc, OTUS_DEBUG_RESET, "rate=0x%02x ridx=%d\n",
-		    rs->rs_rates[i], on->ridx[i]);
-	}
+	on->tx_done = 0;
+	on->tx_err = 0;
+	on->tx_retries = 0;
 }
+
 static void
 otus_cmd_handle_response(struct otus_softc *sc, struct ar_cmd_hdr *hdr)
 {
@@ -1491,7 +1482,6 @@ otus_cmd_rxeof(struct otus_softc *sc, uint8_t *buf, int len)
 	{
 		struct ar_evt_tx_comp *tx = (struct ar_evt_tx_comp *)&hdr[1];
 		struct ieee80211_node *ni;
-		int ackfailcnt;
 
 		ni = ieee80211_find_node(&ic->ic_sta, tx->macaddr);
 		if (ni == NULL) {
@@ -1509,19 +1499,21 @@ otus_cmd_rxeof(struct otus_softc *sc, uint8_t *buf, int len)
 
 		switch (le16toh(tx->status)) {
 		case AR_TX_STATUS_COMP:
+#if 0
 			ackfailcnt = 0;
 			ieee80211_ratectl_tx_complete(ni->ni_vap, ni,
 			    IEEE80211_RATECTL_TX_SUCCESS, &ackfailcnt, NULL);
+#endif
+			/*
+			 * We don't get the above; only error notifications.
+			 * Sigh.  So, don't worry about this.
+			 */
 			break;
 		case AR_TX_STATUS_RETRY_COMP:
-			ackfailcnt = 1;
-			ieee80211_ratectl_tx_complete(ni->ni_vap, ni,
-			    IEEE80211_RATECTL_TX_SUCCESS, &ackfailcnt, NULL);
+			OTUS_NODE(ni)->tx_retries++;
 			break;
 		case AR_TX_STATUS_FAILED:
-			ackfailcnt = 1;
-			ieee80211_ratectl_tx_complete(ni->ni_vap, ni,
-			    IEEE80211_RATECTL_TX_FAILURE, &ackfailcnt, NULL);
+			OTUS_NODE(ni)->tx_err++;
 			break;
 		}
 		ieee80211_free_node(ni);
@@ -2066,6 +2058,19 @@ otus_hw_rate_is_ofdm(struct otus_softc *sc, uint8_t hw_rate)
 }
 
 
+static void
+otus_tx_update_ratectl(struct otus_softc *sc, struct ieee80211_node *ni)
+{
+	int tx, tx_success, tx_retry;
+
+	tx = OTUS_NODE(ni)->tx_done;
+	tx_success = OTUS_NODE(ni)->tx_done - OTUS_NODE(ni)->tx_err;
+	tx_retry = OTUS_NODE(ni)->tx_retries;
+
+	ieee80211_ratectl_tx_update(ni->ni_vap, ni, &tx, &tx_success,
+	    &tx_retry);
+}
+
 /*
  * XXX TODO: support tx bpf parameters for configuration!
  */
@@ -2149,11 +2154,13 @@ otus_tx(struct otus_softc *sc, struct ieee80211_node *ni, struct mbuf *m,
 		phyctl |= AR_TX_PHY_ANTMSK(sc->txmask);
 	}
 
-#if 0
+	/* Update net80211 with the current counters */
+	otus_tx_update_ratectl(sc, ni);
+
 	/* Update rate control stats for frames that are ACK'ed. */
 	if (!(macctl & AR_TX_MAC_NOACK))
-		((struct otus_node *)ni)->amn.amn_txcnt++;
-#endif
+		OTUS_NODE(ni)->tx_done++;
+
 
 	/* Fill Tx descriptor. */
 	head = (struct ar_tx_head *)data->buf;

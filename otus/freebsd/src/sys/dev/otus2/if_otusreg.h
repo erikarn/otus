@@ -891,7 +891,9 @@ struct otus_data {
 
 struct otus_node {
 	struct ieee80211_node		ni;
-	uint8_t				ridx[IEEE80211_RATE_MAXSIZE];
+	uint64_t			tx_done;
+	uint64_t			tx_err;
+	uint64_t			tx_retries;
 };
 
 #define OTUS_CONFIG_INDEX               0
