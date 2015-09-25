@@ -232,6 +232,7 @@ struct ar_cmd_hdr {
 #define AR_EVT_TX_COMP		0x01
 #define AR_EVT_TBTT		0x02
 #define AR_EVT_ATIM		0x03
+#define AR_EVT_DO_BB_RESET	0x09
 
 	uint16_t	token;	/* Driver private data. */
 } __packed;

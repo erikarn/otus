@@ -1524,6 +1524,15 @@ otus_cmd_rxeof(struct otus_softc *sc, uint8_t *buf, int len)
 	}
 	case AR_EVT_TBTT:
 		break;
+	case AR_EVT_DO_BB_RESET:
+		/*
+		 * This is "tell driver to reset baseband" from ar9170-fw.
+		 *
+		 * I'm not sure what we should do here, so I'm going to
+		 * fall through; it gets generated when RTSRetryCnt internally
+		 * reaches '5' - I guess the firmware authors thought that
+		 * meant that the BB may have gone deaf or something.
+		 */
 	default:
 		device_printf(sc->sc_dev,
 		    "%s: received notification code=0x%02x len=%d\n",
