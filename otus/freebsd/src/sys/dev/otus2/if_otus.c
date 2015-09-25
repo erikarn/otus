@@ -157,8 +157,7 @@ int		otus_write_barrier(struct otus_softc *);
 struct		ieee80211_node *otus_node_alloc(struct ieee80211com *);
 int		otus_media_change(struct ifnet *);
 int		otus_read_eeprom(struct otus_softc *);
-void		otus_newassoc(struct ieee80211com *, struct ieee80211_node *,
-		    int);
+void		otus_newassoc(struct ieee80211_node *, int);
 void		otus_cmd_rxeof(struct otus_softc *, uint8_t *, int);
 void		otus_sub_rxeof(struct otus_softc *, uint8_t *, int,
 		    struct mbufq *);
@@ -765,6 +764,7 @@ otus_attachhook(struct otus_softc *sc)
 	ic->ic_update_chw = otus_update_chw;
 	ic->ic_ampdu_enable = otus_ampdu_enable;
 	ic->ic_wme.wme_update = otus_wme_update;
+	ic->ic_newassoc = otus_newassoc;
 
 #ifdef notyet
 	ic->ic_set_key = otus_set_key;
@@ -1223,9 +1223,6 @@ otus_newstate(struct ieee80211vap *vap, enum ieee80211_state nstate, int arg)
 			otus_updateslot(sc);
 			otus_set_bssid(sc, ni->ni_bssid);
 
-			/* Fake a join to init the Tx rate. */
-			otus_newassoc(ic, ni, 1);
-
 			/* Start calibration timer. */
 			taskqueue_enqueue_timeout(taskqueue_thread,
 			    &sc->calib_to, hz);
@@ -1393,8 +1390,9 @@ otus_read_eeprom(struct otus_softc *sc)
 }
 
 void
-otus_newassoc(struct ieee80211com *ic, struct ieee80211_node *ni, int isnew)
+otus_newassoc(struct ieee80211_node *ni, int isnew)
 {
+	struct ieee80211com *ic = ni->ni_ic;
 	struct otus_softc *sc = ic->ic_softc;
 	struct otus_node *on = OTUS_NODE(ni);
 	struct ieee80211_rateset *rs = &ni->ni_rates;
@@ -2128,9 +2126,9 @@ otus_tx(struct otus_softc *sc, struct ieee80211_node *ni, struct mbuf *m,
 	data->m = m;
 
 	OTUS_DPRINTF(sc, OTUS_DEBUG_XMIT,
-	    "%s: tx: m=%p; data=%p; len=%d mac=0x%04x phy=0x%08x rate=%d\n",
+	    "%s: tx: m=%p; data=%p; len=%d mac=0x%04x phy=0x%08x rate=%d, ridx=%d, ni_txrate=%d\n",
 	    __func__, m, data, head->len, head->macctl, head->phyctl,
-	    otus_rates[ridx].rate);
+	    otus_rates[ridx].rate, ridx, ni->ni_txrate);
 
 	/* Submit transfer */
 	STAILQ_INSERT_TAIL(&sc->sc_tx_pending[OTUS_BULK_TX], data, next);
