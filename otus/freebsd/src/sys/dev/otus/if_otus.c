@@ -2,6 +2,7 @@
 
 /*-
  * Copyright (c) 2009 Damien Bergamini <damien.bergamini@free.fr>
+ * Copyright (c) 2015 Adrian Chadd <adrian@FreeBSD.org>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -19,6 +20,9 @@
 /*
  * Driver for Atheros AR9001U chipset.
  */
+
+#include <sys/cdefs.h>
+__FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
 #include <sys/endian.h>

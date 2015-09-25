@@ -3,6 +3,7 @@
 /*-
  * Copyright (c) 2009 Damien Bergamini <damien.bergamini@free.fr>
  * Copyright (c) 2007-2008 Atheros Communications, Inc.
+ * Copyright (c) 2015 Adrian Chadd <adrian@FreeBSD.org>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -15,7 +16,11 @@
  * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
  * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ *
+ * $FreeBSD$
  */
+#ifndef	__IF_OTUSREG_H__
+#define	__IF_OTUSREG_H__
 
 /* USB Endpoints addresses. */
 #define AR_EPT_BULK_TX_NO	(UE_DIR_OUT | 1)
@@ -1015,3 +1020,5 @@ struct otus_softc {
 #define sc_txtap	sc_txtapu.th
 	int				sc_txtap_len;
 };
+
+#endif	/* __IF_OTUSREG_H__ */
