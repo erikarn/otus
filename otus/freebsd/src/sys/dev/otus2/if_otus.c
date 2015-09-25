@@ -81,6 +81,7 @@ SYSCTL_INT(_hw_usb_otus, OID_AUTO, debug, CTLFLAG_RWTUN, &otus_debug, 0,
 #define	OTUS_DEBUG_CMDNOTIFY	0x00000100
 #define	OTUS_DEBUG_REGIO	0x00000200
 #define	OTUS_DEBUG_IRQ		0x00000400
+#define	OTUS_DEBUG_TXCOMP	0x00000800
 #define	OTUS_DEBUG_ANY		0xffffffff
 
 #define	OTUS_DPRINTF(sc, dm, ...) \
@@ -1503,7 +1504,7 @@ otus_cmd_rxeof(struct otus_softc *sc, uint8_t *buf, int len)
 			break;
 		}
 
-		OTUS_DPRINTF(sc, OTUS_DEBUG_TXDONE,
+		OTUS_DPRINTF(sc, OTUS_DEBUG_TXCOMP,
 		    "tx completed %s status=%d phy=0x%x\n",
 		    ether_sprintf(tx->macaddr), le16toh(tx->status),
 		    le32toh(tx->phy));
