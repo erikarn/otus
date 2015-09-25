@@ -2788,13 +2788,17 @@ otus_delete_key_cb(struct otus_softc *sc, void *arg)
 }
 #endif
 
+/*
+ * XXX TODO: check if we have to be doing any calibration in the host
+ * or whether it's purely a firmware thing.
+ */
 void
 otus_calibrate_to(void *arg, int pending)
 {
+#if 0
 	struct otus_softc *sc = arg;
 
 	device_printf(sc->sc_dev, "%s: called\n", __func__);
-#if 0
 	struct ieee80211com *ic = &sc->sc_ic;
 	struct ieee80211_node *ni;
 	int s;
