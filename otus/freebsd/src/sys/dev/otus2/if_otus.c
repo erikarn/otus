@@ -2000,20 +2000,88 @@ otus_bulk_irq_callback(struct usb_xfer *xfer, usb_error_t error)
 	}
 }
 
+/*
+ * Map net80211 rate to hw rate for otus MAC/PHY.
+ */
+static uint8_t
+otus_rate_to_hw_rate(struct otus_softc *sc, uint8_t rate)
+{
+	int is_2ghz;
+
+	is_2ghz = !! (IEEE80211_IS_CHAN_2GHZ(sc->sc_ic.ic_curchan));
+
+	switch (rate) {
+	/* CCK */
+	case 2:
+		return (0x0);
+	case 4:
+		return (0x1);
+	case 11:
+		return (0x2);
+	case 22:
+		return (0x3);
+	/* OFDM */
+	case 12:
+		return (0xb);
+	case 18:
+		return (0xf);
+	case 24:
+		return (0xa);
+	case 36:
+		return (0xe);
+	case 48:
+		return (0x9);
+	case 72:
+		return (0xd);
+	case 96:
+		return (0x8);
+	case 108:
+		return (0xc);
+	default:
+		device_printf(sc->sc_dev, "%s: unknown rate '%d'\n",
+		    __func__, (int) rate);
+	case 0:
+		if (is_2ghz)
+			return (0x0);	/* 1MB CCK */
+		else
+			return (0xb);	/* 6MB OFDM */
+
+	/* XXX TODO: HT */
+	}
+}
+
+static int
+otus_hw_rate_is_ofdm(struct otus_softc *sc, uint8_t hw_rate)
+{
+
+	switch (hw_rate) {
+	case 0x0:
+	case 0x1:
+	case 0x2:
+	case 0x3:
+		return (0);
+	default:
+		return (1);
+	}
+}
+
+
+/*
+ * XXX TODO: support tx bpf parameters for configuration!
+ */
 static int
 otus_tx(struct otus_softc *sc, struct ieee80211_node *ni, struct mbuf *m,
     struct otus_data *data)
 {
 	struct ieee80211com *ic = &sc->sc_ic;
 	struct ieee80211vap *vap = ni->ni_vap;
-	struct otus_node *on = (void *)ni;
 	struct ieee80211_frame *wh;
 	struct ieee80211_key *k;
 	struct ar_tx_head *head;
 	uint32_t phyctl;
 	uint16_t macctl, qos;
-	uint8_t qid;
-	int ridx, hasqos, xferlen;
+	uint8_t qid, rate;
+	int hasqos, xferlen;
 
 	/* XXX TODO: ensure data->buf is actually big enough for this frame */
 
@@ -2045,11 +2113,11 @@ otus_tx(struct otus_softc *sc, struct ieee80211_node *ni, struct mbuf *m,
 	/* Pickup a rate index. */
 	if (IEEE80211_IS_MULTICAST(wh->i_addr1) ||
 	    (wh->i_fc[0] & IEEE80211_FC0_TYPE_MASK) != IEEE80211_FC0_TYPE_DATA) {
-		ridx = (ic->ic_curmode == IEEE80211_MODE_11A) ?
-		    OTUS_RIDX_OFDM6 : OTUS_RIDX_CCK1;
+		/* Get lowest rate */
+		rate = otus_rate_to_hw_rate(sc, 0);
 	} else {
 		(void) ieee80211_ratectl_rate(ni, NULL, 0);
-		ridx = on->ridx[ni->ni_txrate];
+		rate = otus_rate_to_hw_rate(sc, ni->ni_txrate);
 	}
 
 	phyctl = 0;
@@ -2063,8 +2131,7 @@ otus_tx(struct otus_softc *sc, struct ieee80211_node *ni, struct mbuf *m,
 	if (!IEEE80211_IS_MULTICAST(wh->i_addr1)) {
 		if (m->m_pkthdr.len + IEEE80211_CRC_LEN >= vap->iv_rtsthreshold)
 			macctl |= AR_TX_MAC_RTS;
-		else if ((ic->ic_flags & IEEE80211_F_USEPROT) &&
-		    ridx >= OTUS_RIDX_OFDM6) {
+		else if (ic->ic_flags & IEEE80211_F_USEPROT) {
 			if (ic->ic_protmode == IEEE80211_PROT_CTSONLY)
 				macctl |= AR_TX_MAC_CTS;
 			else if (ic->ic_protmode == IEEE80211_PROT_RTSCTS)
@@ -2072,13 +2139,11 @@ otus_tx(struct otus_softc *sc, struct ieee80211_node *ni, struct mbuf *m,
 		}
 	}
 
-	phyctl |= AR_TX_PHY_MCS(otus_rates[ridx].mcs);
-	if (ridx >= OTUS_RIDX_OFDM6) {
+	phyctl |= AR_TX_PHY_MCS(rate);
+	if (otus_hw_rate_is_ofdm(sc, rate)) {
 		phyctl |= AR_TX_PHY_MT_OFDM;
-		if (ridx <= OTUS_RIDX_OFDM24)
-			phyctl |= AR_TX_PHY_ANTMSK(sc->txmask);
-		else
-			phyctl |= AR_TX_PHY_ANTMSK(1);
+		/* Always use all tx antennas for now, just to be safe */
+		phyctl |= AR_TX_PHY_ANTMSK(sc->txmask);
 	} else {	/* CCK */
 		phyctl |= AR_TX_PHY_MT_CCK;
 		phyctl |= AR_TX_PHY_ANTMSK(sc->txmask);
@@ -2126,9 +2191,9 @@ otus_tx(struct otus_softc *sc, struct ieee80211_node *ni, struct mbuf *m,
 	data->m = m;
 
 	OTUS_DPRINTF(sc, OTUS_DEBUG_XMIT,
-	    "%s: tx: m=%p; data=%p; len=%d mac=0x%04x phy=0x%08x rate=%d, ridx=%d, ni_txrate=%d\n",
+	    "%s: tx: m=%p; data=%p; len=%d mac=0x%04x phy=0x%08x rate=0x%02x, ni_txrate=%d\n",
 	    __func__, m, data, head->len, head->macctl, head->phyctl,
-	    otus_rates[ridx].rate, ridx, ni->ni_txrate);
+	    (int) rate, (int) ni->ni_txrate);
 
 	/* Submit transfer */
 	STAILQ_INSERT_TAIL(&sc->sc_tx_pending[OTUS_BULK_TX], data, next);
