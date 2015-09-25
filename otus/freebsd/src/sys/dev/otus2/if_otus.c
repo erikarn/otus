@@ -2885,9 +2885,9 @@ otus_led_newstate_type3(struct otus_softc *sc)
 
 	if (!vap) {
 		state = 0;	/* led off */
-	else if (vap->vap_state == IEEE80211_S_INIT) {
+	} else if (vap->iv_state == IEEE80211_S_INIT) {
 		state = 0;	/* LED off. */
-	} else if (vap->vap_state == IEEE80211_S_RUN) {
+	} else if (vap->iv_state == IEEE80211_S_RUN) {
 		/* Associated, LED always on. */
 		if (IEEE80211_IS_CHAN_2GHZ(sc->sc_curchan))
 			state = AR_LED0_ON;	/* 2GHz=>Red. */
