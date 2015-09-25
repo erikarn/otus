@@ -692,8 +692,7 @@ otus_attachhook(struct otus_softc *sc)
 	sc->sc_led_newstate = otus_led_newstate_type3;	/* XXX */
 
 	device_printf(sc->sc_dev,
-	    "%s: MAC/BBP AR9170, RF AR%X, MIMO %dT%dR, address %s\n",
-	    __func__,
+	    "MAC/BBP AR9170, RF AR%X, MIMO %dT%dR, address %s\n",
 	    (sc->capflags & AR5416_OPFLAGS_11A) ?
 	        0x9104 : ((sc->txmask == 0x5) ? 0x9102 : 0x9101),
 	    (sc->txmask == 0x5) ? 2 : 1, (sc->rxmask == 0x5) ? 2 : 1,
