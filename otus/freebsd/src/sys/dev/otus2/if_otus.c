@@ -820,8 +820,6 @@ otus_load_firmware(struct otus_softc *sc, const char *name, uint32_t addr)
 
 	error = 0;
 
-	device_printf(sc->sc_dev, "%s: loading firmware (%s)\n", __func__, name);
-
 	/* Read firmware image from the filesystem. */
 	if ((fw = firmware_get(name)) == NULL) {
 		device_printf(sc->sc_dev,
@@ -856,7 +854,9 @@ otus_load_firmware(struct otus_softc *sc, const char *name, uint32_t addr)
 	OTUS_UNLOCK(sc);
 
 	firmware_put(fw, FIRMWARE_UNLOAD);
-	device_printf(sc->sc_dev, "%s: %s: error=%d\n", __func__, name, error);
+	if (error != 0)
+		device_printf(sc->sc_dev,
+		    "%s: %s: error=%d\n", __func__, name, error);
 	return error;
 }
 
