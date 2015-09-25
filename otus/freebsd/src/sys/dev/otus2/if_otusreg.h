@@ -968,10 +968,12 @@ struct otus_softc {
 	struct timeout_task		scan_to;
 	struct timeout_task		calib_to;
 
+	/* register batch writes */
 	int				write_idx;
-	int				tx_cur;
-	int				tx_queued;
+
 	uint32_t			led_state;
+
+	/* current firmware message serial / token number */
 	int				token;
 
 	const uint32_t			*phy_vals;
