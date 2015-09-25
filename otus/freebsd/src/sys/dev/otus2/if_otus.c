@@ -55,6 +55,7 @@
 #include <net80211/ieee80211_regdomain.h>
 #include <net80211/ieee80211_radiotap.h>
 #include <net80211/ieee80211_ratectl.h>
+#include <net80211/ieee80211_input.h>
 
 #include <dev/usb/usb.h>
 #include <dev/usb/usbdi.h>
@@ -2128,26 +2129,57 @@ otus_tx(struct otus_softc *sc, struct ieee80211_node *ni, struct mbuf *m,
 int
 otus_set_multi(struct otus_softc *sc)
 {
-	device_printf(sc->sc_dev, "%s: XXX TODO\n", __func__);
-	return (0);
-#if 0
-	struct arpcom *ac = &sc->sc_ic.ic_ac;
-	struct ifnet *ifp = &ac->ac_if;
-	struct ether_multi *enm;
-	struct ether_multistep step;
 	uint32_t lo, hi;
+	struct ieee80211com *ic = &sc->sc_ic;
 	int r;
-	uint8_t bit;
 
-	if (ac->ac_multirangecnt > 0)
-		ifp->if_flags |= IFF_ALLMULTI;
-
+	/*
+	 * XXX TODO: looks like promisc mode should involve
+	 * setting this!
+	 */
+#if 0
 	if ((ifp->if_flags & (IFF_ALLMULTI | IFF_PROMISC)) != 0) {
 		lo = hi = 0xffffffff;
 		goto done;
 	}
+#endif
+
 	lo = hi = 0;
-	ETHER_FIRST_MULTI(step, ac, enm);
+	if (ic->ic_allmulti == 0) {
+		struct ieee80211vap *vap;
+		struct ifnet *ifp;
+		struct ifmultiaddr *ifma;
+
+		lo = hi = 0;
+		TAILQ_FOREACH(vap, &ic->ic_vaps, iv_next) {
+			ifp = vap->iv_ifp;
+			if_maddr_rlock(ifp);
+			TAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
+				caddr_t dl;
+				uint32_t val;
+
+				dl = LLADDR((struct sockaddr_dl *) ifma->ifma_addr);
+				val = LE_READ_4(dl + 4);
+				/* Get address byte 5 */
+				val = val & 0x0000ff00;
+				val = val >> 8;
+
+				/* As per below, shift it >> 2 to get only 6 bits */
+				val = val >> 2;
+				if (val < 32)
+					lo |= 1 << val;
+				else
+					hi |= 1 << (val - 32);
+			}
+			if_maddr_runlock(ifp);
+		}
+
+	} else {
+		lo = hi = ~0;
+	}
+
+#if 0
+	/* XXX openbsd code */
 	while (enm != NULL) {
 		bit = enm->enm_addrlo[5] >> 2;
 		if (bit < 32)
@@ -2156,7 +2188,8 @@ otus_set_multi(struct otus_softc *sc)
 			hi |= 1 << (bit - 32);
 		ETHER_NEXT_MULTI(step, enm);
 	}
- done:
+#endif
+
 	hi |= 1U << 31;	/* Make sure the broadcast bit is set. */
 
 	OTUS_LOCK(sc);
@@ -2165,7 +2198,6 @@ otus_set_multi(struct otus_softc *sc)
 	r = otus_write_barrier(sc);
 	OTUS_UNLOCK(sc);
 	return (r);
-#endif
 }
 
 static void
