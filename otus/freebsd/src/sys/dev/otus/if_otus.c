@@ -2760,13 +2760,16 @@ otus_set_chan(struct otus_softc *sc, struct ieee80211_channel *c, int assoc)
 		sc->bb_reset = 1;
 	}
 #ifdef USB_DEBUG
-	if (otus_debug) {
-		printf("calibration status=0x%x\n", le32toh(rsp.status));
+	if (otus_debug & OTUS_DEBUG_RESET) {
+		device_printf(sc->sc_dev, "calibration status=0x%x\n",
+		    le32toh(rsp.status));
 		for (i = 0; i < 2; i++) {	/* 2 Rx chains */
 			/* Sign-extend 9-bit NF values. */
-			printf("noisefloor chain %d=%d\n", i,
+			device_printf(sc->sc_dev,
+			    "noisefloor chain %d=%d\n", i,
 			    (((int32_t)le32toh(rsp.nf[i])) << 4) >> 23);
-			printf("noisefloor ext chain %d=%d\n", i,
+			device_printf(sc->sc_dev,
+			    "noisefloor ext chain %d=%d\n", i,
 			    ((int32_t)le32toh(rsp.nf_ext[i])) >> 23);
 		}
 	}
