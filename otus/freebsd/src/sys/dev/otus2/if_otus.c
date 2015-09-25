@@ -2242,11 +2242,11 @@ otus_updateslot(struct otus_softc *sc)
 	struct ieee80211com *ic = &sc->sc_ic;
 	uint32_t slottime;
 
+	OTUS_LOCK_ASSERT(sc);
+
 	slottime = (ic->ic_flags & IEEE80211_F_SHSLOT) ? 9 : 20;
-	OTUS_LOCK(sc);
 	otus_write(sc, AR_MAC_REG_SLOT_TIME, slottime << 10);
 	(void)otus_write_barrier(sc);
-	OTUS_UNLOCK(sc);
 }
 
 int
@@ -2786,6 +2786,9 @@ otus_calibrate_to(void *arg, int pending)
 int
 otus_set_bssid(struct otus_softc *sc, const uint8_t *bssid)
 {
+
+	OTUS_LOCK_ASSERT(sc);
+
 	otus_write(sc, AR_MAC_REG_BSSID_L,
 	    bssid[0] | bssid[1] << 8 | bssid[2] << 16 | bssid[3] << 24);
 	otus_write(sc, AR_MAC_REG_BSSID_H,
@@ -2796,6 +2799,8 @@ otus_set_bssid(struct otus_softc *sc, const uint8_t *bssid)
 int
 otus_set_macaddr(struct otus_softc *sc, const uint8_t *addr)
 {
+	OTUS_LOCK_ASSERT(sc);
+
 	otus_write(sc, AR_MAC_REG_MAC_ADDR_L,
 	    addr[0] | addr[1] << 8 | addr[2] << 16 | addr[3] << 24);
 	otus_write(sc, AR_MAC_REG_MAC_ADDR_H,
