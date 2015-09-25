@@ -1542,6 +1542,7 @@ void
 otus_sub_rxeof(struct otus_softc *sc, uint8_t *buf, int len, struct mbufq *rxq)
 {
 	struct ieee80211com *ic = &sc->sc_ic;
+	struct ieee80211_rx_stats rxs;
 #if 0
 	struct ieee80211_node *ni;
 #endif
@@ -1654,8 +1655,15 @@ otus_sub_rxeof(struct otus_softc *sc, uint8_t *buf, int len, struct mbufq *rxq)
 	}
 #endif
 
+	/* Add RSSI/NF to this mbuf */
+	bzero(&rxs, sizeof(rxs));
+	rxs.r_flags = IEEE80211_R_NF | IEEE80211_R_RSSI;
+	rxs.nf = sc->sc_nf[0];	/* XXX chain 0 != combined rssi/nf */
+	rxs.rssi = tail->rssi;
+	/* XXX TODO: add MIMO RSSI/NF as well */
+	ieee80211_add_rx_params(m, &rxs);
+
 	/* XXX make a method */
-	/* XXX RSSI, etc */
 	STAILQ_INSERT_TAIL(&rxq->mq_head, m, m_stailqpkt);
 
 #if 0
@@ -1760,18 +1768,16 @@ tr_setup:
 		 */
 		OTUS_UNLOCK(sc);
 		while ((m = mbufq_dequeue(&scrx)) != NULL) {
-			/* XXX TODO: put rssi info in an RX mbuf tag */
-			int rssi = 1;
 			wh = mtod(m, struct ieee80211_frame *);
 			ni = ieee80211_find_rxnode(ic,
 			    (struct ieee80211_frame_min *)wh);
 			if (ni != NULL) {
 				if (ni->ni_flags & IEEE80211_NODE_HT)
 					m->m_flags |= M_AMPDU;
-				(void)ieee80211_input(ni, m, rssi, 0);
+				(void)ieee80211_input_mimo(ni, m, NULL);
 				ieee80211_free_node(ni);
 			} else
-				(void)ieee80211_input_all(ic, m, rssi, 0);
+				(void)ieee80211_input_mimo_all(ic, m, NULL);
 		}
 		OTUS_LOCK(sc);
 		break;
@@ -2765,6 +2771,9 @@ otus_set_chan(struct otus_softc *sc, struct ieee80211_channel *c, int assoc)
 		}
 	}
 #endif
+	for (i = 0; i < OTUS_NUM_CHAINS; i++) {
+		sc->sc_nf[i] = ((((int32_t)le32toh(rsp.nf[i])) << 4) >> 23);
+	}
 	sc->sc_curchan = c;
 finish:
 	return (error);

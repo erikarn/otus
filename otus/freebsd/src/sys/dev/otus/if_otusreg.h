@@ -796,12 +796,7 @@ struct ar5416eeprom {
 	uint8_t			padding;
 } __packed;
 
-
-#define OTUS_TX_DATA_LIST_COUNT	8
-#define OTUS_RX_DATA_LIST_COUNT	1
-
-#define OTUS_CMD_TIMEOUT	1000
-#define OTUS_TX_TIMEOUT		1000
+#define	OTUS_NUM_CHAINS			2
 
 #define OTUS_UID(aid)		(IEEE80211_AID(aid) + 4)
 
@@ -978,6 +973,9 @@ struct otus_softc {
 
 	/* current firmware message serial / token number */
 	int				token;
+
+	/* current noisefloor, from SET_FREQUENCY */
+	int				sc_nf[OTUS_NUM_CHAINS];
 
 	const uint32_t			*phy_vals;
 
