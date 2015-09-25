@@ -80,6 +80,7 @@ SYSCTL_INT(_hw_usb_otus, OID_AUTO, debug, CTLFLAG_RWTUN, &otus_debug, 0,
 #define	OTUS_DEBUG_STATE	0x00000080
 #define	OTUS_DEBUG_CMDNOTIFY	0x00000100
 #define	OTUS_DEBUG_REGIO	0x00000200
+#define	OTUS_DEBUG_IRQ		0x00000400
 #define	OTUS_DEBUG_ANY		0xffffffff
 
 #define	OTUS_DPRINTF(sc, dm, ...) \
@@ -1951,7 +1952,7 @@ otus_bulk_irq_callback(struct usb_xfer *xfer, usb_error_t error)
 	int sumlen;
 
 	usbd_xfer_status(xfer, &actlen, &sumlen, NULL, NULL);
-	OTUS_DPRINTF(sc, OTUS_DEBUG_ANY,
+	OTUS_DPRINTF(sc, OTUS_DEBUG_IRQ,
 	    "%s: called; state=%d\n", __func__, USB_GET_STATE(xfer));
 
 	switch (USB_GET_STATE(xfer)) {
@@ -1961,7 +1962,7 @@ otus_bulk_irq_callback(struct usb_xfer *xfer, usb_error_t error)
 		 * "actlen" has the total length for all frames
 		 * transferred.
 		 */
-		OTUS_DPRINTF(sc, OTUS_DEBUG_ANY,
+		OTUS_DPRINTF(sc, OTUS_DEBUG_IRQ,
 		    "%s: comp; %d bytes\n",
 		    __func__,
 		    actlen);
@@ -1974,7 +1975,7 @@ otus_bulk_irq_callback(struct usb_xfer *xfer, usb_error_t error)
 		/*
 		 * Setup xfer frame lengths/count and data
 		 */
-		OTUS_DPRINTF(sc, OTUS_DEBUG_ANY, "%s: setup\n", __func__);
+		OTUS_DPRINTF(sc, OTUS_DEBUG_IRQ, "%s: setup\n", __func__);
 		usbd_xfer_set_frame_len(xfer, 0, usbd_xfer_max_len(xfer));
 		usbd_transfer_submit(xfer);
 		break;
@@ -1984,7 +1985,7 @@ otus_bulk_irq_callback(struct usb_xfer *xfer, usb_error_t error)
 		 * Print error message and clear stall
 		 * for example.
 		 */
-		device_printf(sc->sc_dev, "%s: ERROR?\n", __func__);
+		OTUS_DPRINTF(sc, OTUS_DEBUG_IRQ, "%s: ERROR?\n", __func__);
 		break;
 	}
 }
