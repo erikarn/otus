@@ -1453,9 +1453,6 @@ void
 otus_cmd_rxeof(struct otus_softc *sc, uint8_t *buf, int len)
 {
 	struct ieee80211com *ic = &sc->sc_ic;
-#if 0
-	struct otus_tx_cmd *cmd;
-#endif
 	struct ar_cmd_hdr *hdr;
 
 	OTUS_LOCK_ASSERT(sc);
@@ -1495,29 +1492,30 @@ otus_cmd_rxeof(struct otus_softc *sc, uint8_t *buf, int len)
 	{
 		struct ar_evt_tx_comp *tx = (struct ar_evt_tx_comp *)&hdr[1];
 		struct ieee80211_node *ni;
-		struct ieee80211vap *vap = TAILQ_FIRST(&ic->ic_vaps);
 		int ackfailcnt;
-#if 0
-		struct otus_node *on;
-#endif
+
+		ni = ieee80211_find_node(&ic->ic_sta, tx->macaddr);
+		if (ni == NULL) {
+			device_printf(sc->sc_dev,
+			    "%s: txcomp on unknown node (%s)\n",
+			    __func__,
+			    ether_sprintf(tx->macaddr));
+			break;
+		}
 
 		OTUS_DPRINTF(sc, OTUS_DEBUG_TXDONE,
 		    "tx completed %s status=%d phy=0x%x\n",
 		    ether_sprintf(tx->macaddr), le16toh(tx->status),
 		    le32toh(tx->phy));
-		if (vap == NULL)
-			break;
-
-		ni = ieee80211_ref_node(vap->iv_bss);
 
 		/* XXX TODO: do net80211 node lookup based on tx->macaddr */
 		if (tx->status == 0) {
 			ackfailcnt = 0;
-			ieee80211_ratectl_tx_complete(vap, ni,
+			ieee80211_ratectl_tx_complete(ni->ni_vap, ni,
 			    IEEE80211_RATECTL_TX_SUCCESS, &ackfailcnt, NULL);
 		} else {
 			ackfailcnt = 1;
-			ieee80211_ratectl_tx_complete(vap, ni,
+			ieee80211_ratectl_tx_complete(ni->ni_vap, ni,
 			    IEEE80211_RATECTL_TX_FAILURE, &ackfailcnt, NULL);
 		}
 		ieee80211_free_node(ni);
