@@ -419,13 +419,90 @@ otus_parent(struct ieee80211com *ic)
 		ieee80211_start_all(ic);
 }
 
+static void
+otus_drain_mbufq(struct otus_softc *sc)
+{
+	struct mbuf *m;
+	struct ieee80211_node *ni;
+
+	OTUS_LOCK_ASSERT(sc);
+	while ((m = mbufq_dequeue(&sc->sc_snd)) != NULL) {
+		ni = (struct ieee80211_node *) m->m_pkthdr.rcvif;
+		m->m_pkthdr.rcvif = NULL;
+		ieee80211_free_node(ni);
+		m_freem(m);
+	}
+}
+
+static void
+otus_tx_start(struct otus_softc *sc)
+{
+
+	taskqueue_enqueue(taskqueue_thread, &sc->tx_task);
+}
+
 static int
 otus_transmit(struct ieee80211com *ic, struct mbuf *m)
 {
+	struct otus_softc *sc = ic->ic_softc;
+	int error;
 
-	/* XXX TODO: implement */
-	printf("%s: TODO\n", __func__);
-	return (ENXIO);
+	OTUS_LOCK(sc);
+	if (! sc->sc_running) {
+		OTUS_UNLOCK(sc);
+		return (ENXIO);
+	}
+
+	/* XXX TODO: handle fragments */
+	error = mbufq_enqueue(&sc->sc_snd, m);
+	if (error) {
+		OTUS_DPRINTF(sc, OTUS_DEBUG_XMIT,
+		    "%s: mbufq_enqueue failed: %d\n",
+		    __func__,
+		    error);
+		OTUS_UNLOCK(sc);
+		return (error);
+	}
+	OTUS_UNLOCK(sc);
+
+	/* Kick TX */
+	otus_tx_start(sc);
+
+	return (0);
+}
+
+static void
+_otus_start(struct otus_softc *sc)
+{
+	struct ieee80211_node *ni;
+	struct otus_data *bf;
+	struct mbuf *m;
+
+	OTUS_LOCK_ASSERT(sc);
+
+	while ((m = mbufq_dequeue(&sc->sc_snd)) != NULL) {
+		bf = otus_getbuf(sc);
+		if (bf == NULL) {
+			OTUS_DPRINTF(sc, OTUS_DEBUG_XMIT,
+			    "%s: failed to get buffer\n", __func__);
+			mbufq_prepend(&sc->sc_snd, m);
+			break;
+		}
+
+		ni = (struct ieee80211_node *)m->m_pkthdr.rcvif;
+		m->m_pkthdr.rcvif = NULL;
+
+		if (otus_tx(sc, ni, m, bf) != 0) {
+			OTUS_DPRINTF(sc, OTUS_DEBUG_XMIT,
+			    "%s: failed to transmit\n", __func__);
+			if_inc_counter(ni->ni_vap->iv_ifp,
+			    IFCOUNTER_OERRORS, 1);
+			otus_freebuf(sc, bf);
+			ieee80211_free_node(ni);
+			m_freem(m);
+			break;
+		}
+	}
 }
 
 static void
@@ -433,7 +510,9 @@ otus_tx_task(void *arg, int pending)
 {
 	struct otus_softc *sc = arg;
 
-	device_printf(sc->sc_dev, "%s: TODO\n", __func__);
+	OTUS_LOCK(sc);
+	_otus_start(sc);
+	OTUS_UNLOCK(sc);
 }
 
 static int
@@ -1778,7 +1857,7 @@ tr_setup:
 		if (data == NULL) {
 			OTUS_DPRINTF(sc, OTUS_DEBUG_XMIT,
 			    "%s: empty pending queue sc %p\n", __func__, sc);
-			return;
+			goto finish;
 		}
 		STAILQ_REMOVE_HEAD(&sc->sc_tx_pending[which], next);
 		STAILQ_INSERT_TAIL(&sc->sc_tx_active[which], data, next);
@@ -1802,6 +1881,10 @@ tr_setup:
 		}
 		break;
 	}
+
+finish:
+	/* Kick TX */
+	otus_tx_start(sc);
 }
 
 static void
@@ -2783,6 +2866,11 @@ otus_init(struct otus_softc *sc)
 	OTUS_UNLOCK_ASSERT(sc);
 
 	OTUS_LOCK(sc);
+
+	/* Drain any pending TX frames */
+	otus_drain_mbufq(sc);
+
+	/* Init MAC */
 	if ((error = otus_init_mac(sc)) != 0) {
 		OTUS_UNLOCK(sc);
 		device_printf(sc->sc_dev,
@@ -2790,7 +2878,7 @@ otus_init(struct otus_softc *sc)
 		return error;
 	}
 
-	(void)otus_set_macaddr(sc, ic->ic_macaddr);
+	(void) otus_set_macaddr(sc, ic->ic_macaddr);
 
 #if 0
 	switch (ic->ic_opmode) {
@@ -2819,6 +2907,7 @@ otus_init(struct otus_softc *sc)
 	otus_write(sc, 0x1c3700, 0x0f000002);
 	otus_write(sc, 0x1c3c40, 0x1);
 
+	/* XXX ic_opmode? */
 	otus_write(sc, AR_MAC_REG_SNIFFER,
 	    (ic->ic_opmode == IEEE80211_M_MONITOR) ? 0x2000001 : 0x2000000);
 	(void)otus_write_barrier(sc);
@@ -2872,8 +2961,8 @@ otus_stop(struct otus_softc *sc)
 	otus_write(sc, 0x1c3d30, 0);
 	(void)otus_write_barrier(sc);
 
-	/* XXX flush mbuf queue */
-	device_printf(sc->sc_dev, "%s: TODO: flush tx/rx queues\n", __func__);
+	/* Drain any pending TX frames */
+	otus_drain_mbufq(sc);
 
 	OTUS_UNLOCK(sc);
 }
