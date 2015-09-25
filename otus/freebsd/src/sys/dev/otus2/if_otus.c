@@ -1452,8 +1452,8 @@ otus_cmd_handle_response(struct otus_softc *sc, struct ar_cmd_hdr *hdr)
 void
 otus_cmd_rxeof(struct otus_softc *sc, uint8_t *buf, int len)
 {
-#if 0
 	struct ieee80211com *ic = &sc->sc_ic;
+#if 0
 	struct otus_tx_cmd *cmd;
 #endif
 	struct ar_cmd_hdr *hdr;
@@ -1488,18 +1488,16 @@ otus_cmd_rxeof(struct otus_softc *sc, uint8_t *buf, int len)
 	}
 
 	/* Received unsolicited notification. */
-	device_printf(sc->sc_dev,
-	    "%s: received notification code=0x%02x len=%d\n",
-	    __func__,
-	    hdr->code, hdr->len);
 	switch (hdr->code & 0x3f) {
 	case AR_EVT_BEACON:
 		break;
 	case AR_EVT_TX_COMP:
 	{
 		struct ar_evt_tx_comp *tx = (struct ar_evt_tx_comp *)&hdr[1];
-#if 0
 		struct ieee80211_node *ni;
+		struct ieee80211vap *vap = TAILQ_FIRST(&ic->ic_vaps);
+		int ackfailcnt;
+#if 0
 		struct otus_node *on;
 #endif
 
@@ -1507,31 +1505,31 @@ otus_cmd_rxeof(struct otus_softc *sc, uint8_t *buf, int len)
 		    "tx completed %s status=%d phy=0x%x\n",
 		    ether_sprintf(tx->macaddr), le16toh(tx->status),
 		    le32toh(tx->phy));
-#if 0
-		s = splnet();
-#ifdef notyet
-#ifndef IEEE80211_STA_ONLY
-		if (ic->ic_opmode != IEEE80211_M_STA) {
-			ni = ieee80211_find_node(ic, tx->macaddr);
-			if (__predict_false(ni == NULL)) {
-				splx(s);
-				break;
-			}
-		} else
-#endif
-#endif
-			ni = ic->ic_bss;
-		/* Update rate control statistics. */
-		on = (void *)ni;
-		/* NB: we do not set the TX_MAC_RATE_PROBING flag. */
-		if (__predict_true(tx->status != 0))
-			on->amn.amn_retrycnt++;
-		splx(s);
-#endif
+		if (vap == NULL)
+			break;
+
+		ni = ieee80211_ref_node(vap->iv_bss);
+
+		/* XXX TODO: do net80211 node lookup based on tx->macaddr */
+		if (tx->status == 0) {
+			ackfailcnt = 0;
+			ieee80211_ratectl_tx_complete(vap, ni,
+			    IEEE80211_RATECTL_TX_SUCCESS, &ackfailcnt, NULL);
+		} else {
+			ackfailcnt = 1;
+			ieee80211_ratectl_tx_complete(vap, ni,
+			    IEEE80211_RATECTL_TX_FAILURE, &ackfailcnt, NULL);
+		}
+		ieee80211_free_node(ni);
 		break;
 	}
 	case AR_EVT_TBTT:
 		break;
+	default:
+		device_printf(sc->sc_dev,
+		    "%s: received notification code=0x%02x len=%d\n",
+		    __func__,
+		    hdr->code, hdr->len);
 	}
 }
 
