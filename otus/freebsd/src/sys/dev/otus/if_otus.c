@@ -417,6 +417,8 @@ otus_parent(struct ieee80211com *ic)
 		if (!sc->sc_running) {
 			otus_init(sc);
 			startall = 1;
+		} else {
+			(void) otus_set_multi(sc);
 		}
 	} else if (sc->sc_running)
 		otus_stop(sc);
@@ -763,6 +765,7 @@ otus_attachhook(struct otus_softc *sc)
 	ic->ic_vap_create = otus_vap_create;
 	ic->ic_vap_delete = otus_vap_delete;
 	ic->ic_update_mcast = otus_update_mcast;
+	ic->ic_update_promisc = otus_update_mcast;
 	ic->ic_parent = otus_parent;
 	ic->ic_transmit = otus_transmit;
 	ic->ic_update_chw = otus_update_chw;
@@ -2226,19 +2229,11 @@ otus_set_multi(struct otus_softc *sc)
 	struct ieee80211com *ic = &sc->sc_ic;
 	int r;
 
-	/*
-	 * XXX TODO: looks like promisc mode should involve
-	 * setting this!
-	 */
-#if 0
-	if ((ifp->if_flags & (IFF_ALLMULTI | IFF_PROMISC)) != 0) {
-		lo = hi = 0xffffffff;
-		goto done;
-	}
-#endif
-
-	lo = hi = 0;
-	if (ic->ic_allmulti == 0) {
+	if (ic->ic_allmulti > 0 || ic->ic_promisc > 0 ||
+	    ic->ic_opmode == IEEE80211_M_MONITOR) {
+		lo = 0xffffffff;
+		hi = 0xffffffff;
+	} else {
 		struct ieee80211vap *vap;
 		struct ifnet *ifp;
 		struct ifmultiaddr *ifma;
@@ -2266,11 +2261,7 @@ otus_set_multi(struct otus_softc *sc)
 			}
 			if_maddr_runlock(ifp);
 		}
-
-	} else {
-		lo = hi = ~0;
 	}
-
 #if 0
 	/* XXX openbsd code */
 	while (enm != NULL) {
