@@ -3065,13 +3065,6 @@ otus_init(struct otus_softc *sc)
 	otus_write(sc, 0x1c3d30, 0x100);
 	(void)otus_write_barrier(sc);
 
-#if 0
-	if (ic->ic_opmode == IEEE80211_M_MONITOR)
-		ieee80211_new_state(ic, IEEE80211_S_RUN, -1);
-	else
-		ieee80211_new_state(ic, IEEE80211_S_SCAN, -1);
-#endif
-
 	sc->sc_running = 1;
 
 	OTUS_UNLOCK(sc);
