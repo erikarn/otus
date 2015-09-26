@@ -807,7 +807,8 @@ struct ar5416eeprom {
 
 #define OTUS_MAX_TXCMDSZ	64
 #define OTUS_RXBUFSZ		(8 * 1024)
-#define OTUS_TXBUFSZ		(4 * 1024)
+/* Bumped for later A-MSDU and legacy fast-frames TX support */
+#define OTUS_TXBUFSZ		(8 * 1024)
 
 /* Default EDCA parameters for when QoS is disabled. */
 static const struct wmeParams otus_edca_def[WME_NUM_AC] = {

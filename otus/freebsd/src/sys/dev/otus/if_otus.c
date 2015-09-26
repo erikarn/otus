@@ -545,6 +545,9 @@ otus_raw_xmit(struct ieee80211_node *ni, struct mbuf *m,
 		goto error;
 	}
 
+	/*
+	 * XXX TODO: support TX bpf params
+	 */
 	if (otus_tx(sc, ni, m, bf) != 0) {
 		error = EIO;
 		goto error;
@@ -718,6 +721,7 @@ otus_attachhook(struct otus_softc *sc)
 	    IEEE80211_C_SHPREAMBLE |	/* Short preamble supported. */
 	    IEEE80211_C_WME |		/* WME/QoS */
 	    IEEE80211_C_SHSLOT |	/* Short slot time supported. */
+	    IEEE80211_C_FF |		/* Atheros fast-frames supported. */
 	    IEEE80211_C_WPA;		/* WPA/RSN. */
 
 	/* XXX TODO: 11n */
@@ -1133,10 +1137,6 @@ otus_getbuf(struct otus_softc *sc)
 	OTUS_LOCK_ASSERT(sc);
 
 	bf = _otus_getbuf(sc);
-	if (bf == NULL) {
-		OTUS_DPRINTF(sc, OTUS_DEBUG_ANY,
-		    "%s: no buffers\n", __func__);
-	}
 	return (bf);
 }
 
@@ -2101,8 +2101,6 @@ otus_tx(struct otus_softc *sc, struct ieee80211_node *ni, struct mbuf *m,
 	uint8_t qid, rate;
 	int hasqos, xferlen;
 
-	/* XXX TODO: ensure data->buf is actually big enough for this frame */
-
 	wh = mtod(m, struct ieee80211_frame *);
 	if (wh->i_fc[1] & IEEE80211_FC1_PROTECTED) {
 		k = ieee80211_crypto_encap(ni, m);
@@ -2114,6 +2112,17 @@ otus_tx(struct otus_softc *sc, struct ieee80211_node *ni, struct mbuf *m,
 			return (ENOBUFS);
 		}
 		wh = mtod(m, struct ieee80211_frame *);
+	}
+
+	/* Calculate transfer length; ensure data buffer is large enough */
+	xferlen = sizeof (*head) + m->m_pkthdr.len;
+	if (xferlen > OTUS_TXBUFSZ) {
+		device_printf(sc->sc_dev,
+		    "%s: 802.11 TX frame is %d bytes, max %d bytes\n",
+		    __func__,
+		    xferlen,
+		    OTUS_TXBUFSZ);
+		return (ENOBUFS);
 	}
 
 	hasqos = !! IEEE80211_QOS_HAS_SEQ(wh);
@@ -2181,29 +2190,6 @@ otus_tx(struct otus_softc *sc, struct ieee80211_node *ni, struct mbuf *m,
 	head->macctl = htole16(macctl);
 	head->phyctl = htole32(phyctl);
 
-#if 0
-#if NBPFILTER > 0
-	if (__predict_false(sc->sc_drvbpf != NULL)) {
-		struct otus_tx_radiotap_header *tap = &sc->sc_txtap;
-		struct mbuf mb;
-
-		tap->wt_flags = 0;
-		tap->wt_rate = otus_rates[ridx].rate;
-		tap->wt_chan_freq = htole16(ic->ic_bss->ni_chan->ic_freq);
-		tap->wt_chan_flags = htole16(ic->ic_bss->ni_chan->ic_flags);
-
-		mb.m_data = (caddr_t)tap;
-		mb.m_len = sc->sc_txtap_len;
-		mb.m_next = m;
-		mb.m_nextpkt = NULL;
-		mb.m_type = 0;
-		mb.m_flags = 0;
-		bpf_mtap(sc->sc_drvbpf, &mb, BPF_DIRECTION_OUT);
-	}
-#endif
-#endif
-
-	xferlen = sizeof (*head) + m->m_pkthdr.len;
 	m_copydata(m, 0, m->m_pkthdr.len, (caddr_t)&head[1]);
 
 	data->buflen = xferlen;
