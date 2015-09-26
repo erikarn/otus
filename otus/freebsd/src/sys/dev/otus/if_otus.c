@@ -198,17 +198,17 @@ int		otus_init(struct otus_softc *sc);
 void		otus_stop(struct otus_softc *sc);
 
 static device_method_t otus_methods[] = {
-	DEVMETHOD(device_probe,         otus_match),
-	DEVMETHOD(device_attach,        otus_attach),
-	DEVMETHOD(device_detach,        otus_detach),
+	DEVMETHOD(device_probe,		otus_match),
+	DEVMETHOD(device_attach,	otus_attach),
+	DEVMETHOD(device_detach,	otus_detach),
 
 	DEVMETHOD_END
 };
 
 static driver_t otus_driver = {
-        .name = "otus",
-        .methods = otus_methods,
-        .size = sizeof(struct otus_softc)
+	.name = "otus",
+	.methods = otus_methods,
+	.size = sizeof(struct otus_softc)
 };
 
 static devclass_t otus_devclass;
@@ -232,7 +232,7 @@ static const struct usb_config otus_config[OTUS_N_XFER] = {
 	.bufsize = 0x200,
 	.flags = {.pipe_bof = 1,.force_short_xfer = 1,},
 	.callback = otus_bulk_tx_callback,
-	.timeout = 5000,        /* ms */
+	.timeout = 5000,	/* ms */
 	},
 	[OTUS_BULK_RX] = {
 	.type = UE_BULK,
@@ -257,7 +257,7 @@ static const struct usb_config otus_config[OTUS_N_XFER] = {
 	.bufsize = OTUS_MAX_CTRLSZ,
 	.flags = {.pipe_bof = 1,.force_short_xfer = 1,},
 	.callback = otus_bulk_cmd_callback,
-	.timeout = 5000,        /* ms */
+	.timeout = 5000,	/* ms */
 	},
 };
 
@@ -366,18 +366,18 @@ otus_vap_create(struct ieee80211com *ic, const char name[IFNAMSIZ], int unit,
 	struct otus_vap *uvp;
 	struct ieee80211vap *vap;
 
-	if (!TAILQ_EMPTY(&ic->ic_vaps))         /* only one at a time */
+	if (!TAILQ_EMPTY(&ic->ic_vaps))	 /* only one at a time */
 		return (NULL);
 
 	uvp =  malloc(sizeof(struct otus_vap), M_80211_VAP, M_WAITOK | M_ZERO);
 	vap = &uvp->vap;
 
-        if (ieee80211_vap_setup(ic, vap, name, unit, opmode,
-            flags, bssid) != 0) {
-                /* out of memory */
-                free(uvp, M_80211_VAP);
-                return (NULL);
-        }
+	if (ieee80211_vap_setup(ic, vap, name, unit, opmode,
+	    flags, bssid) != 0) {
+		/* out of memory */
+		free(uvp, M_80211_VAP);
+		return (NULL);
+	}
 
 	/* override state transition machine */
 	uvp->newstate = vap->iv_newstate;
@@ -389,10 +389,10 @@ otus_vap_create(struct ieee80211com *ic, const char name[IFNAMSIZ], int unit,
 
 	ieee80211_ratectl_init(vap);
 
-        /* complete setup */
-        ieee80211_vap_attach(vap, ieee80211_media_change,
-            ieee80211_media_status, mac);
-        ic->ic_opmode = opmode;
+	/* complete setup */
+	ieee80211_vap_attach(vap, ieee80211_media_change,
+	    ieee80211_media_status, mac);
+	ic->ic_opmode = opmode;
 
 	return (vap);
 }
@@ -698,7 +698,7 @@ otus_attachhook(struct otus_softc *sc)
 	device_printf(sc->sc_dev,
 	    "MAC/BBP AR9170, RF AR%X, MIMO %dT%dR, address %s\n",
 	    (sc->capflags & AR5416_OPFLAGS_11A) ?
-	        0x9104 : ((sc->txmask == 0x5) ? 0x9102 : 0x9101),
+		0x9104 : ((sc->txmask == 0x5) ? 0x9102 : 0x9101),
 	    (sc->txmask == 0x5) ? 2 : 1, (sc->rxmask == 0x5) ? 2 : 1,
 	    ether_sprintf(ic->ic_macaddr));
 
