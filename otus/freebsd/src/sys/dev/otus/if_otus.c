@@ -150,6 +150,7 @@ static void	otus_free_txcmd(struct otus_softc *, struct otus_tx_cmd *);
 
 void		otus_next_scan(void *, int);
 static void	otus_tx_task(void *, int pending);
+static void	otus_wme_update_task(void *, int pending);
 void		otus_do_async(struct otus_softc *,
 		    void (*)(struct otus_softc *, void *), void *, int);
 int		otus_newstate(struct ieee80211vap *, enum ieee80211_state,
@@ -292,6 +293,7 @@ otus_attach(device_t self)
 	TIMEOUT_TASK_INIT(taskqueue_thread, &sc->scan_to, 0, otus_next_scan, sc);
 	TIMEOUT_TASK_INIT(taskqueue_thread, &sc->calib_to, 0, otus_calibrate_to, sc);
 	TASK_INIT(&sc->tx_task, 0, otus_tx_task, sc);
+	TASK_INIT(&sc->wme_update_task, 0, otus_wme_update_task, sc);
 	mbufq_init(&sc->sc_snd, ifqmaxlen);
 
 	iface_index = 0;
@@ -336,6 +338,7 @@ otus_detach(device_t self)
 	taskqueue_drain_timeout(taskqueue_thread, &sc->scan_to);
 	taskqueue_drain_timeout(taskqueue_thread, &sc->calib_to);
 	taskqueue_drain(taskqueue_thread, &sc->tx_task);
+	taskqueue_drain(taskqueue_thread, &sc->wme_update_task);
 
 #if 0
 	/* Wait for all queued asynchronous commands to complete. */
@@ -584,18 +587,48 @@ otus_set_channel(struct ieee80211com *ic)
 	OTUS_UNLOCK(sc);
 }
 
+static void
+otus_wme_update_task(void *arg, int pending)
+{
+	struct otus_softc *sc = arg;
+
+	OTUS_LOCK(sc);
+	/*
+	 * XXX TODO: take temporary copy of EDCA information
+	 * when scheduling this so we have a more time-correct view
+	 * of things.
+	 */
+	otus_updateedca(sc);
+	OTUS_UNLOCK(sc);
+}
+
+static void
+otus_wme_schedule_update(struct otus_softc *sc)
+{
+
+	taskqueue_enqueue(taskqueue_thread, &sc->wme_update_task);
+}
+
+/*
+ * This is called by net80211 in RX packet context, so we
+ * can't sleep here.
+ *
+ * TODO: have net80211 schedule an update itself for its
+ * own internal taskqueue.
+ */
 static int
 otus_wme_update(struct ieee80211com *ic)
 {
 	struct otus_softc *sc = ic->ic_softc;
 
-	otus_updateedca(sc);
+	otus_wme_schedule_update(sc);
 	return (0);
 }
 
 static int
 otus_ampdu_enable(struct ieee80211_node *ni, struct ieee80211_tx_ampdu *tap)
 {
+
 	/* For now, no A-MPDU TX support in the driver */
 	return (0);
 }
@@ -947,7 +980,6 @@ otus_alloc_cmd_list(struct otus_softc *sc, struct otus_tx_cmd cmd[],
 
 	for (i = 0; i < ndata; i++) {
 		struct otus_tx_cmd *dp = &cmd[i];
-		dp->sc = sc;
 		dp->buf = malloc(maxsz, M_USBDEV, M_NOWAIT);
 		dp->odata = NULL;
 		if (dp->buf == NULL) {
@@ -1690,7 +1722,7 @@ otus_sub_rxeof(struct otus_softc *sc, uint8_t *buf, int len, struct mbufq *rxq)
 static void
 otus_rxeof(struct usb_xfer *xfer, struct otus_data *data, struct mbufq *rxq)
 {
-	struct otus_softc *sc = data->sc;
+	struct otus_softc *sc = usbd_xfer_softc(xfer);
 	caddr_t buf = data->buf;
 	struct ar_rx_head *head;
 	uint16_t hlen;
@@ -2273,69 +2305,56 @@ otus_set_multi(struct otus_softc *sc)
 static void
 otus_updateedca(struct otus_softc *sc)
 {
-
-	device_printf(sc->sc_dev, "%s: TODO\n", __func__);
-#if 0
 #define EXP2(val)	((1 << (val)) - 1)
 #define AIFS(val)	((val) * 9 + 10)
 	struct ieee80211com *ic = &sc->sc_ic;
 	const struct wmeParams *edca;
-	int s;
 
-	/*
-	 * XXX Disabled for now; freebsd's net80211
-	 * stores the cwmin/cwmax as log values and
-	 * I just want to double-check what the
-	 * hardware expects.
-	 */
+	OTUS_LOCK_ASSERT(sc);
 
-	OTUS_LOCK(sc);
-
-	edca = (ic->ic_flags & IEEE80211_F_QOS) ?
-	    ic->ic_edca_ac : otus_edca_def;
+	edca = ic->ic_wme.wme_chanParams.cap_wmeParams;
 
 	/* Set CWmin/CWmax values. */
 	otus_write(sc, AR_MAC_REG_AC0_CW,
-	    EXP2(edca[WME_AC_BE].ac_ecwmax) << 16 |
-	    EXP2(edca[WME_AC_BE].ac_ecwmin));
+	    EXP2(edca[WME_AC_BE].wmep_logcwmax) << 16 |
+	    EXP2(edca[WME_AC_BE].wmep_logcwmin));
 	otus_write(sc, AR_MAC_REG_AC1_CW,
-	    EXP2(edca[WME_AC_BK].ac_ecwmax) << 16 |
-	    EXP2(edca[WME_AC_BK].ac_ecwmin));
+	    EXP2(edca[WME_AC_BK].wmep_logcwmax) << 16 |
+	    EXP2(edca[WME_AC_BK].wmep_logcwmin));
 	otus_write(sc, AR_MAC_REG_AC2_CW,
-	    EXP2(edca[WME_AC_VI].ac_ecwmax) << 16 |
-	    EXP2(edca[WME_AC_VI].ac_ecwmin));
+	    EXP2(edca[WME_AC_VI].wmep_logcwmax) << 16 |
+	    EXP2(edca[WME_AC_VI].wmep_logcwmin));
 	otus_write(sc, AR_MAC_REG_AC3_CW,
-	    EXP2(edca[WME_AC_VO].ac_ecwmax) << 16 |
-	    EXP2(edca[WME_AC_VO].ac_ecwmin));
+	    EXP2(edca[WME_AC_VO].wmep_logcwmax) << 16 |
+	    EXP2(edca[WME_AC_VO].wmep_logcwmin));
 	otus_write(sc, AR_MAC_REG_AC4_CW,		/* Special TXQ. */
-	    EXP2(edca[WME_AC_VO].ac_ecwmax) << 16 |
-	    EXP2(edca[WME_AC_VO].ac_ecwmin));
+	    EXP2(edca[WME_AC_VO].wmep_logcwmax) << 16 |
+	    EXP2(edca[WME_AC_VO].wmep_logcwmin));
 
 	/* Set AIFSN values. */
 	otus_write(sc, AR_MAC_REG_AC1_AC0_AIFS,
-	    AIFS(edca[WME_AC_VI].ac_aifsn) << 24 |
-	    AIFS(edca[WME_AC_BK].ac_aifsn) << 12 |
-	    AIFS(edca[WME_AC_BE].ac_aifsn));
+	    AIFS(edca[WME_AC_VI].wmep_aifsn) << 24 |
+	    AIFS(edca[WME_AC_BK].wmep_aifsn) << 12 |
+	    AIFS(edca[WME_AC_BE].wmep_aifsn));
 	otus_write(sc, AR_MAC_REG_AC3_AC2_AIFS,
-	    AIFS(edca[WME_AC_VO].ac_aifsn) << 16 |	/* Special TXQ. */
-	    AIFS(edca[WME_AC_VO].ac_aifsn) <<  4 |
-	    AIFS(edca[WME_AC_VI].ac_aifsn) >>  8);
+	    AIFS(edca[WME_AC_VO].wmep_aifsn) << 16 |	/* Special TXQ. */
+	    AIFS(edca[WME_AC_VO].wmep_aifsn) <<  4 |
+	    AIFS(edca[WME_AC_VI].wmep_aifsn) >>  8);
 
 	/* Set TXOP limit. */
 	otus_write(sc, AR_MAC_REG_AC1_AC0_TXOP,
-	    edca[WME_AC_BK].ac_txoplimit << 16 |
-	    edca[WME_AC_BE].ac_txoplimit);
+	    edca[WME_AC_BK].wmep_txopLimit << 16 |
+	    edca[WME_AC_BE].wmep_txopLimit);
 	otus_write(sc, AR_MAC_REG_AC3_AC2_TXOP,
-	    edca[WME_AC_VO].ac_txoplimit << 16 |
-	    edca[WME_AC_VI].ac_txoplimit);
+	    edca[WME_AC_VO].wmep_txopLimit << 16 |
+	    edca[WME_AC_VI].wmep_txopLimit);
+
+	/* XXX ACK policy? */
 
 	(void)otus_write_barrier(sc);
 
-	OTUS_UNLOCK(sc);
 #undef AIFS
 #undef EXP2
-
-#endif
 }
 
 static void
@@ -3064,6 +3083,8 @@ otus_stop(struct otus_softc *sc)
 
 	taskqueue_drain_timeout(taskqueue_thread, &sc->scan_to);
 	taskqueue_drain_timeout(taskqueue_thread, &sc->calib_to);
+	taskqueue_drain(taskqueue_thread, &sc->tx_task);
+	taskqueue_drain(taskqueue_thread, &sc->wme_update_task);
 
 	OTUS_LOCK(sc);
 	sc->sc_running = 0;

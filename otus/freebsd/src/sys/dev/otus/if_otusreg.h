@@ -872,7 +872,6 @@ struct otus_softc;
 
 /* Firmware commands */
 struct otus_tx_cmd {
-	struct otus_softc	*sc;
 	uint8_t			*buf;
 	uint16_t		buflen;
 	void *			*odata;
@@ -969,6 +968,7 @@ struct otus_softc {
 	struct ieee80211_channel	*sc_curchan;
 
 	struct task			tx_task;
+	struct task			wme_update_task;
 	struct timeout_task		scan_to;
 	struct timeout_task		calib_to;
 
