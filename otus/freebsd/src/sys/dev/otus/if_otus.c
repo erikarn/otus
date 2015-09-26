@@ -632,7 +632,7 @@ otus_attachhook(struct otus_softc *sc)
 	uint8_t bands;
 
 	/* Not locked */
-	error = otus_load_firmware(sc, "otus-init", AR_FW_INIT_ADDR);
+	error = otus_load_firmware(sc, "otusfw_init", AR_FW_INIT_ADDR);
 	if (error != 0) {
 		device_printf(sc->sc_dev, "%s: could not load %s firmware\n",
 		    __func__, "init");
@@ -643,7 +643,7 @@ otus_attachhook(struct otus_softc *sc)
 	otus_delay_ms(sc, 1000);
 
 	/* Not locked */
-	error = otus_load_firmware(sc, "otus-main", AR_FW_MAIN_ADDR);
+	error = otus_load_firmware(sc, "otusfw_main", AR_FW_MAIN_ADDR);
 	if (error != 0) {
 		device_printf(sc->sc_dev, "%s: could not load %s firmware\n",
 		    __func__, "main");

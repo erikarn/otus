@@ -34,7 +34,8 @@ Alternatively, to load the firmware images as a module at boot time, place
 the following line in
 .Xr loader.conf 5 :
 .Bd -literal -offset indent
-otusfw_load="YES"
+otusfw_init_load="YES"
+otusfw_main_load="YES"
 .Ed
 .Sh DESCRIPTION
 This module provides the firmware for the Atheros AR9170 based
