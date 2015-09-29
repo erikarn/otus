@@ -22,7 +22,9 @@
  */
 
 #include <sys/cdefs.h>
-__FBSDID("$FreeBSD$");
+__FBSDID("$FreeBSD: head/sys/dev/otus/if_otus.c 288319 2015-09-28 01:09:48Z adrian $");
+
+#include "opt_wlan.h"
 
 #include <sys/param.h>
 #include <sys/endian.h>
@@ -60,6 +62,9 @@ __FBSDID("$FreeBSD$");
 #include <net80211/ieee80211_radiotap.h>
 #include <net80211/ieee80211_ratectl.h>
 #include <net80211/ieee80211_input.h>
+#ifdef	IEEE80211_SUPPORT_SUPERG
+#include <net80211/ieee80211_superg.h>
+#endif
 
 #include <dev/usb/usb.h>
 #include <dev/usb/usbdi.h>
@@ -340,6 +345,7 @@ otus_detach(device_t self)
 	taskqueue_drain(taskqueue_thread, &sc->tx_task);
 	taskqueue_drain(taskqueue_thread, &sc->wme_update_task);
 
+	otus_close_pipes(sc);
 #if 0
 	/* Wait for all queued asynchronous commands to complete. */
 	usb_rem_wait_task(sc->sc_udev, &sc->sc_task);
@@ -348,7 +354,6 @@ otus_detach(device_t self)
 #endif
 
 	ieee80211_ifdetach(ic);
-	otus_close_pipes(sc);
 	mtx_destroy(&sc->sc_mtx);
 	return 0;
 }
@@ -755,6 +760,7 @@ otus_attachhook(struct otus_softc *sc)
 	    IEEE80211_C_WME |		/* WME/QoS */
 	    IEEE80211_C_SHSLOT |	/* Short slot time supported. */
 	    IEEE80211_C_FF |		/* Atheros fast-frames supported. */
+	    IEEE80211_C_MONITOR |
 	    IEEE80211_C_WPA;		/* WPA/RSN. */
 
 	/* XXX TODO: 11n */
@@ -949,9 +955,12 @@ fail:	otus_close_pipes(sc);
 void
 otus_close_pipes(struct otus_softc *sc)
 {
+
+	OTUS_LOCK(sc);
 	otus_free_tx_cmd_list(sc);
 	otus_free_tx_list(sc);
 	otus_free_rx_list(sc);
+	OTUS_UNLOCK(sc);
 
 	usbd_transfer_unsetup(sc->sc_xfer, OTUS_N_XFER);
 }
@@ -1838,6 +1847,9 @@ tr_setup:
 			} else
 				(void)ieee80211_input_mimo_all(ic, m, NULL);
 		}
+#ifdef	IEEE80211_SUPPORT_SUPERG
+		ieee80211_ff_age_all(ic, 100);
+#endif
 		OTUS_LOCK(sc);
 		break;
 	default:
@@ -1865,6 +1877,14 @@ otus_txeof(struct usb_xfer *xfer, struct otus_data *data)
 	    "%s: called; data=%p\n", __func__, data);
 
 	OTUS_LOCK_ASSERT(sc);
+
+	if (sc->sc_tx_n_active == 0) {
+		device_printf(sc->sc_dev,
+		    "%s: completed but tx_active=0\n",
+		    __func__);
+	} else {
+		sc->sc_tx_n_active--;
+	}
 
 	if (data->m) {
 		/* XXX status? */
@@ -1926,6 +1946,7 @@ tr_setup:
 		if (data == NULL) {
 			OTUS_DPRINTF(sc, OTUS_DEBUG_XMIT,
 			    "%s: empty pending queue sc %p\n", __func__, sc);
+			sc->sc_tx_n_active = 0;
 			goto finish;
 		}
 		STAILQ_REMOVE_HEAD(&sc->sc_tx_pending[which], next);
@@ -1934,6 +1955,7 @@ tr_setup:
 		OTUS_DPRINTF(sc, OTUS_DEBUG_XMIT,
 		    "%s: submitting transfer %p\n", __func__, data);
 		usbd_transfer_submit(xfer);
+		sc->sc_tx_n_active++;
 		break;
 	default:
 		data = STAILQ_FIRST(&sc->sc_tx_active[which]);
@@ -1952,6 +1974,22 @@ tr_setup:
 	}
 
 finish:
+#ifdef	IEEE80211_SUPPORT_SUPERG
+	/*
+	 * If the TX active queue drops below a certain
+	 * threshold, ensure we age fast-frames out so they're
+	 * transmitted.
+	 */
+	if (sc->sc_tx_n_active < 2) {
+		/* XXX ew - net80211 should defer this for us! */
+		OTUS_UNLOCK(sc);
+		ieee80211_ff_flush(ic, WME_AC_VO);
+		ieee80211_ff_flush(ic, WME_AC_VI);
+		ieee80211_ff_flush(ic, WME_AC_BE);
+		ieee80211_ff_flush(ic, WME_AC_BK);
+		OTUS_LOCK(sc);
+	}
+#endif
 	/* Kick TX */
 	otus_tx_start(sc);
 }
@@ -2192,6 +2230,9 @@ otus_tx(struct otus_softc *sc, struct ieee80211_node *ni, struct mbuf *m,
 	/* Pickup a rate index. */
 	if (IEEE80211_IS_MULTICAST(wh->i_addr1) ||
 	    (wh->i_fc[0] & IEEE80211_FC0_TYPE_MASK) != IEEE80211_FC0_TYPE_DATA) {
+		/* Get lowest rate */
+		rate = otus_rate_to_hw_rate(sc, 0);
+	} else if (m->m_flags & M_EAPOL) {
 		/* Get lowest rate */
 		rate = otus_rate_to_hw_rate(sc, 0);
 	} else {
@@ -3059,13 +3100,22 @@ otus_init(struct otus_softc *sc)
 	}
 #endif
 
-	/* Expect STA operation */
-	otus_write(sc, 0x1c3700, 0x0f000002);
-	otus_write(sc, 0x1c3c40, 0x1);
+	switch (ic->ic_opmode) {
+	case IEEE80211_M_STA:
+		otus_write(sc, 0x1c3700, 0x0f000002);
+		otus_write(sc, 0x1c3c40, 0x1);
+		break;
+	case IEEE80211_M_MONITOR:
+		otus_write(sc, 0x1c368c, 0xffffffff);
+		break;
+	default:
+		break;
+	}
 
 	/* XXX ic_opmode? */
 	otus_write(sc, AR_MAC_REG_SNIFFER,
 	    (ic->ic_opmode == IEEE80211_M_MONITOR) ? 0x2000001 : 0x2000000);
+
 	(void)otus_write_barrier(sc);
 
 	sc->bb_reset = 1;	/* Force cold reset. */

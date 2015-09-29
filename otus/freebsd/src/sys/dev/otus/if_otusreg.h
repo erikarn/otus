@@ -17,7 +17,7 @@
  * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *
- * $FreeBSD$
+ * $FreeBSD: head/sys/dev/otus/if_otusreg.h 288319 2015-09-28 01:09:48Z adrian $
  */
 #ifndef	__IF_OTUSREG_H__
 #define	__IF_OTUSREG_H__
@@ -983,6 +983,10 @@ struct otus_softc {
 
 	/* current noisefloor, from SET_FREQUENCY */
 	int				sc_nf[OTUS_NUM_CHAINS];
+
+	/* How many pending, active transmit frames */
+	int				sc_tx_n_pending;
+	int				sc_tx_n_active;
 
 	const uint32_t			*phy_vals;
 
