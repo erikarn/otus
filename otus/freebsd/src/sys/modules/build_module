@@ -17,4 +17,5 @@ make \
 	MAKESYSPATH="${X_SRCDIR}/share/mk" \
 	SYSDIR="${X_SRCDIR}/sys/" \
 	KERNBUILDDIR="${X_KERNDIR}" \
+	KERN_DEBUGDIR="" \
 	$@
