@@ -66,6 +66,10 @@ __FBSDID("$FreeBSD$");
 #include <net80211/ieee80211_superg.h>
 #endif
 
+#include "hal/linux_compat.h"
+#include "hal/chip_id.h"
+#include "hal/hw.h"
+
 #include "if_athp_debug.h"
 #include "if_athp_var.h"
 #include "if_athp_pci.h"
@@ -101,6 +105,141 @@ MODULE_VERSION(athp, 1);
  vendor     = 'Qualcomm Atheros'
  device     = 'QCA986x/988x 802.11ac Wireless Network Adapter'
  class      = network
+ */
+
+static const struct athp_pci_supp_chip athp_pci_supp_chips[] = {
+	/*
+	 * QCA988X pre 2.0 chips are not supported because they need some
+	 * nasty hacks. ath10k doesn't have them and these devices crash
+	 * horribly because of that.
+	 */
+	{ QCA988X_2_0_DEVICE_ID, QCA988X_HW_2_0_CHIP_ID_REV },
+
+	{ QCA6164_2_1_DEVICE_ID, QCA6174_HW_2_1_CHIP_ID_REV },
+	{ QCA6164_2_1_DEVICE_ID, QCA6174_HW_2_2_CHIP_ID_REV },
+	{ QCA6164_2_1_DEVICE_ID, QCA6174_HW_3_0_CHIP_ID_REV },
+	{ QCA6164_2_1_DEVICE_ID, QCA6174_HW_3_1_CHIP_ID_REV },
+	{ QCA6164_2_1_DEVICE_ID, QCA6174_HW_3_2_CHIP_ID_REV },
+
+	{ QCA6174_2_1_DEVICE_ID, QCA6174_HW_2_1_CHIP_ID_REV },
+	{ QCA6174_2_1_DEVICE_ID, QCA6174_HW_2_2_CHIP_ID_REV },
+	{ QCA6174_2_1_DEVICE_ID, QCA6174_HW_3_0_CHIP_ID_REV },
+	{ QCA6174_2_1_DEVICE_ID, QCA6174_HW_3_1_CHIP_ID_REV },
+	{ QCA6174_2_1_DEVICE_ID, QCA6174_HW_3_2_CHIP_ID_REV },
+
+	{ QCA99X0_2_0_DEVICE_ID, QCA99X0_HW_2_0_CHIP_ID_REV },
+};
+
+
+/*
+ * Bus-space access.
+ */
+static void
+athp_pci_write32(struct athp_pci_softc *psc, uint32_t offset, uint32_t value)
+{
+#if 0
+        int ret;
+#endif
+
+#if 0
+        if (unlikely(offset + sizeof(value) > ar_pci->mem_len)) {
+                ath10k_warn(ar, "refusing to write mmio out of bounds at 0x%08x - 0x%08zx (max 0x%08zx)\n",
+                            offset, offset + sizeof(value), ar_pci->mem_len);
+                return;
+        }
+
+        ret = ath10k_pci_wake(ar);
+        if (ret) {
+                ath10k_warn(ar, "failed to wake target for write32 of 0x%08x at 0x%08x: %d\n",
+                            value, offset, ret);
+                return;
+        }
+#endif
+
+	OS_REG_WRITE(psc, offset, value);
+#if 0
+        ath10k_pci_sleep(ar);
+#endif
+}
+
+static uint32_t
+athp_pci_read32(struct athp_pci_softc *psc, uint32_t offset)
+{
+        uint32_t val;
+#if 0
+        int ret;
+#endif
+
+#if 0
+        if (unlikely(offset + sizeof(val) > ar_pci->mem_len)) {
+                ath10k_warn(ar, "refusing to read mmio out of bounds at 0x%08x - 0x%08zx (max 0x%08zx)\n",
+                            offset, offset + sizeof(val), ar_pci->mem_len);
+                return 0;
+        }
+
+        ret = ath10k_pci_wake(ar);
+        if (ret) {
+                ath10k_warn(ar, "failed to wake target for read32 at 0x%08x: %d\n",
+                            offset, ret);
+                return 0xffffffff;
+        }
+#endif
+        val = OS_REG_READ(psc, offset);
+#if 0
+        ath10k_pci_sleep(ar);
+#endif
+        return val;
+}
+
+static uint32_t
+athp_pci_soc_read32(struct athp_pci_softc *psc, uint32_t addr)
+{
+	//return athp_pci_read32(psc, RTC_SOC_BASE_ADDRESS + addr);
+
+	/* Get base address based on current hardware id */
+	return athp_pci_read32(psc, psc->sc_hwregs->rtc_soc_base_address + addr);
+}
+
+#if 0
+void
+athp_pci_soc_write32(struct ath10k *ar, uint32_t addr, uint32_t val)
+{
+        athp_pci_write32(ar, RTC_SOC_BASE_ADDRESS + addr, val);
+}
+
+uint32_t
+athp_pci_reg_read32(struct ath10k *ar, uint32_t addr)
+{
+        return athp_pci_read32(ar, PCIE_LOCAL_BASE_ADDRESS + addr);
+}
+
+void
+athp_pci_reg_write32(struct ath10k *ar, uint32_t addr, uint32_t val)
+{
+        athp_pci_write32(ar, PCIE_LOCAL_BASE_ADDRESS + addr, val);
+}
+#endif
+
+static int
+athp_pci_chip_is_supported(uint32_t dev_id, uint32_t chip_id)
+{
+	const struct athp_pci_supp_chip *supp_chip;
+	int i;
+	u32 rev_id = MS(chip_id, SOC_CHIP_ID_REV);
+
+	for (i = 0; i < nitems(athp_pci_supp_chips); i++) {
+		supp_chip = &athp_pci_supp_chips[i];
+
+		if (supp_chip->dev_id == dev_id &&
+		    supp_chip->rev_id == rev_id)
+		return (1);
+	}
+
+	return (0);
+}
+
+/*
+ * Driver setup stuff.
  */
 
 static int
@@ -141,11 +280,76 @@ athp_pci_intr(void *arg)
 #define MSI_NUM_REQUEST		(1<<MSI_NUM_REQUEST_LOG2)
 
 static int
+athp_set_regs_mapping(struct athp_pci_softc *psc)
+{
+	/*
+	 * Figure out the hardware revision id and various
+	 * hardware maps to be using.
+	 */
+	switch (psc->sc_deviceid) {
+	case QCA988X_2_0_DEVICE_ID:
+		psc->sc_hwrev = ATH10K_HW_QCA988X;
+		psc->sc_hwregs = &qca988x_regs;
+		break;
+	case QCA6164_2_1_DEVICE_ID:
+	case QCA6174_2_1_DEVICE_ID:
+		psc->sc_hwrev = ATH10K_HW_QCA6174;
+		psc->sc_hwregs = &qca6174_regs;
+		break;
+	case QCA99X0_2_0_DEVICE_ID:
+		psc->sc_hwrev = ATH10K_HW_QCA99X0;
+		psc->sc_hwregs = &qca99x0_regs;
+		break;
+	default:
+		return (0);
+	}
+
+	return (1);
+}
+
+#if 0
+static void
+athp_pci_init_irq_legacy(struct athp_pci_softc *psc)
+{
+	athp_pci_write32(psc, SOC_CORE_BASE_ADDRESS + PCIE_INTR_ENABLE_ADDRESS,
+	    PCIE_INTR_FIRMWARE_MASK | PCIE_INTR_CE_MASK_ALL);
+	return;
+}
+
+static void
+athp_pci_deinit_irq_legacy(struct athp_pci_softc *psc)
+{
+	athp_pci_write32(psc, SOC_CORE_BASE_ADDRESS + PCIE_INTR_ENABLE_ADDRESS, 0);
+}
+#endif
+
+#if 0
+static int
+athp_pci_chip_reset(struct athp_pci_softc *psc)
+{
+        if (QCA_REV_988X(psc))
+                return ath10k_pci_qca988x_chip_reset(psc);
+        else if (QCA_REV_6174(psc))
+                return ath10k_pci_qca6174_chip_reset(psc);
+        else if (QCA_REV_99X0(psc))
+                return ath10k_pci_qca99x0_chip_reset(psc);
+        else
+                return (-1);
+}
+#endif
+
+static int
 athp_pci_attach(device_t dev)
 {
 	struct athp_pci_softc *psc = device_get_softc(dev);
 	struct athp_softc *sc = &psc->sc_sc;
 	int rid;
+//	int ret;
+//	uint32_t chip_id;
+
+	/* Get PCI vendor/device id */
+	psc->sc_vendorid = pci_get_vendor(dev);
+	psc->sc_deviceid = pci_get_device(dev);
 
 	sc->sc_dev = dev;
 	sc->sc_invalid = 1;
@@ -153,15 +357,16 @@ athp_pci_attach(device_t dev)
 	mtx_init(&sc->sc_mtx, device_get_nameunit(dev), MTX_NETWORK_LOCK,
 	    MTX_DEF);
 
+	/* Figure out hardware revision and register map based on above */
+	if (! athp_set_regs_mapping(psc)) {
+		device_printf(dev, "cannot find initial hardware map\n");
+		goto bad;
+	}
+
 	/*
 	 * Enable bus mastering.
 	 */
 	pci_enable_busmaster(dev);
-
-	/*
-	 * Setup other PCI bus configuration parameters.
-	 */
-	athp_pci_setup(dev);
 
 	/*
 	 * Setup memory-mapping of PCI registers.
@@ -202,6 +407,36 @@ athp_pci_attach(device_t dev)
 		goto bad2;
 	}
 
+#if 0
+	/*
+	 * Reset chip; see what the story is.
+	 */
+	ret = athp_pci_chip_reset(psc);
+	if (ret != 0) {
+		device_printf(dev, "couldn't reset chip\n");
+		goto bad2;
+	}
+
+	/* Check the SoC version! */
+	//chip_id = athp_pci_soc_read32(psc, SOC_CHIP_ID_ADDRESS);
+	chip_id = athp_pci_soc_read32(psc,
+	    psc->sc_hwregs->soc_chip_id_address);
+
+	device_printf(dev, "%s: chip_id=0x%08x\n", __func__, chip_id);
+#endif
+#if 0
+        if (chip_id == 0xffffffff) {
+                ath10k_err(ar, "failed to get chip id\n");
+                goto err_free_irq;
+        }
+
+        if (!ath10k_pci_chip_is_supported(pdev->device, chip_id)) {
+                ath10k_err(ar, "device %04x with chip_id %08x isn't supported\n",
+                           pdev->device, chip_id);
+                goto err_free_irq;
+        }
+#endif
+
 	/*
 	 * Setup DMA descriptor area.
 	 */
@@ -237,6 +472,7 @@ bad1:
 
 bad:
 	mtx_destroy(&sc->sc_mtx);
+	/* XXX disable bus mastering? */
 	return (ENXIO);
 }
 
