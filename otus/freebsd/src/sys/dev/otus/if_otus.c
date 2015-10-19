@@ -22,7 +22,7 @@
  */
 
 #include <sys/cdefs.h>
-__FBSDID("$FreeBSD: head/sys/dev/otus/if_otus.c 288319 2015-09-28 01:09:48Z adrian $");
+__FBSDID("$FreeBSD: head/sys/dev/otus/if_otus.c 289557 2015-10-19 01:21:29Z adrian $");
 
 #include "opt_wlan.h"
 
@@ -164,7 +164,8 @@ int		otus_cmd(struct otus_softc *, uint8_t, const void *, int,
 		    void *, int);
 void		otus_write(struct otus_softc *, uint32_t, uint32_t);
 int		otus_write_barrier(struct otus_softc *);
-struct		ieee80211_node *otus_node_alloc(struct ieee80211com *);
+static struct	ieee80211_node *otus_node_alloc(struct ieee80211vap *vap,
+		    const uint8_t mac[IEEE80211_ADDR_LEN]);
 int		otus_media_change(struct ifnet *);
 int		otus_read_eeprom(struct otus_softc *);
 void		otus_newassoc(struct ieee80211_node *, int);
@@ -567,7 +568,6 @@ error:
 	if (bf)
 		otus_freebuf(sc, bf);
 	OTUS_UNLOCK(sc);
-	ieee80211_free_node(ni);
 	m_freem(m);
 	return (ENXIO);
 }
@@ -815,6 +815,7 @@ otus_attachhook(struct otus_softc *sc)
 	ic->ic_ampdu_enable = otus_ampdu_enable;
 	ic->ic_wme.wme_update = otus_wme_update;
 	ic->ic_newassoc = otus_newassoc;
+	ic->ic_node_alloc = otus_node_alloc;
 
 #ifdef notyet
 	ic->ic_set_key = otus_set_key;
@@ -1388,10 +1389,12 @@ otus_write_barrier(struct otus_softc *sc)
 	return error;
 }
 
-struct ieee80211_node *
-otus_node_alloc(struct ieee80211com *ic)
+static struct ieee80211_node *
+otus_node_alloc(struct ieee80211vap *vap, const uint8_t mac[IEEE80211_ADDR_LEN])
 {
-	return malloc(sizeof (struct otus_node), M_DEVBUF, M_NOWAIT | M_ZERO);
+
+	return malloc(sizeof (struct otus_node), M_80211_NODE,
+	    M_NOWAIT | M_ZERO);
 }
 
 #if 0
@@ -1714,7 +1717,6 @@ otus_sub_rxeof(struct otus_softc *sc, uint8_t *buf, int len, struct mbufq *rxq)
 			break;
 		}
 		mb.m_data = (caddr_t)tap;
-		mb.m_len = sc->sc_rxtap_len;
 		mb.m_next = m;
 		mb.m_nextpkt = NULL;
 		mb.m_type = 0;
