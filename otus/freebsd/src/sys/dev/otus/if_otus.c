@@ -1675,6 +1675,7 @@ otus_sub_rxeof(struct otus_softc *sc, uint8_t *buf, int len, struct mbufq *rxq)
 	if (m == NULL) {
 		device_printf(sc->sc_dev, "%s: failed m_get2()\n", __func__);
 		counter_u64_add(ic->ic_ierrors, 1);
+		return;
 	}
 
 	/* Finalize mbuf. */
