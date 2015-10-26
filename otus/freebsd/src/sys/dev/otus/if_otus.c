@@ -1671,9 +1671,12 @@ otus_sub_rxeof(struct otus_softc *sc, uint8_t *buf, int len, struct mbufq *rxq)
 
 	wh = (struct ieee80211_frame *)(plcp + AR_PLCP_HDR_LEN);
 
+	/*
+	 * TODO: I see > 2KiB buffers in this path; is it A-MSDU or something?
+	 */
 	m = m_get2(mlen, M_NOWAIT, MT_DATA, M_PKTHDR);
 	if (m == NULL) {
-		device_printf(sc->sc_dev, "%s: failed m_get2()\n", __func__);
+		device_printf(sc->sc_dev, "%s: failed m_get2() (mlen=%d)\n", __func__, mlen);
 		counter_u64_add(ic->ic_ierrors, 1);
 		return;
 	}
