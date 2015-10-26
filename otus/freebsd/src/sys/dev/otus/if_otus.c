@@ -1645,8 +1645,8 @@ otus_sub_rxeof(struct otus_softc *sc, uint8_t *buf, int len, struct mbufq *rxq)
 	}
 	tail = (struct ar_rx_tail *)(plcp + len - sizeof (*tail));
 
-	/* Discard error frames. */
-	if (__predict_false(tail->error != 0)) {
+	/* Discard error frames; don't discard BAD_RA (eg monitor mode); let net80211 do that */
+	if (__predict_false((tail->error & ~AR_RX_ERROR_BAD_RA) != 0)) {
 		OTUS_DPRINTF(sc, OTUS_DEBUG_RXDONE, "error frame 0x%02x\n", tail->error);
 		if (tail->error & AR_RX_ERROR_FCS) {
 			OTUS_DPRINTF(sc, OTUS_DEBUG_RXDONE, "bad FCS\n");
