@@ -2190,10 +2190,10 @@ rtwn_load_firmware(struct rtwn_softc *sc)
 	reg = (reg & ~R92C_MCUFWDL_WINTINI_RDY) | R92C_MCUFWDL_RDY;
 	rtwn_write_4(sc, R92C_MCUFWDL, reg);
 	/* Wait for firmware readiness. */
-	for (ntries = 0; ntries < 1000; ntries++) {
+	for (ntries = 0; ntries < 2000; ntries++) {
 		if (rtwn_read_4(sc, R92C_MCUFWDL) & R92C_MCUFWDL_WINTINI_RDY)
 			break;
-		DELAY(5);
+		DELAY(50);
 	}
 	if (ntries == 1000) {
 		device_printf(sc->sc_dev,
