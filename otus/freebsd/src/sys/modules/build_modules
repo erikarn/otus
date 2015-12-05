@@ -1,7 +1,6 @@
 #!/bin/sh
 
-# MODULES_LIST="otus otusfw athp"
-MODULES_LIST="athp otusfw athpfw"
+MODULES_LIST="otus otusfw athp rtwn rtwnfw"
 
 for i in ${MODULES_LIST}; do
 	echo "entering ${i}"
