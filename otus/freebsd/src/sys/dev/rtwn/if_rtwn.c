@@ -1639,6 +1639,8 @@ rtwn_tx(struct rtwn_softc *sc, struct mbuf *m, struct ieee80211_node *ni)
 	txd->txdw1 = 0;
 	txd->txdw4 = 0;
 	txd->txdw5 = 0;
+
+	/* XXX TODO: rate control; implement low-rate for EAPOL */
 	if (!IEEE80211_IS_MULTICAST(wh->i_addr1) &&
 	    type == IEEE80211_FC0_TYPE_DATA) {
 		if (ic->ic_curmode == IEEE80211_MODE_11B)
@@ -1660,6 +1662,9 @@ rtwn_tx(struct rtwn_softc *sc, struct mbuf *m, struct ieee80211_node *ni)
 				    R92C_TXDW4_HWRTSEN);
 			}
 		}
+
+		/* XXX TODO: implement rate control */
+
 		/* Send RTS at OFDM24. */
 		txd->txdw4 |= htole32(SM(R92C_TXDW4_RTSRATE, 8));
 		txd->txdw5 |= htole32(SM(R92C_TXDW5_RTSRATE_FBLIMIT, 0xf));
@@ -1769,8 +1774,13 @@ rtwn_tx_done(struct rtwn_softc *sc, int qid)
 		tx_desc = &tx_ring->desc[i];
 		if (le32toh(tx_desc->txdw0) & R92C_TXDW0_OWN)
 			continue;
-		
+
 		bus_dmamap_unload(tx_ring->desc_dmat, tx_ring->desc_map);
+
+		/*
+		 * XXX TODO: figure out whether the transmit succeeded or not.
+		 * .. and then notify rate control.
+		 */
 		ieee80211_tx_complete(tx_data->ni, tx_data->m, 0);
 		tx_data->ni = NULL;
 		tx_data->m = NULL;
