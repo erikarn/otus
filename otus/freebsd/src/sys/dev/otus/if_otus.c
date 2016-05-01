@@ -2346,7 +2346,7 @@ otus_set_multi(struct otus_softc *sc)
 				uint32_t val;
 
 				dl = LLADDR((struct sockaddr_dl *) ifma->ifma_addr);
-				val = LE_READ_4(dl + 4);
+				val = le16dec(dl + 4);
 				/* Get address byte 5 */
 				val = val & 0x0000ff00;
 				val = val >> 8;
